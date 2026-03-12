@@ -8,19 +8,14 @@ use clap::Parser;
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
 
-/// Compile-time version string: `0.1.0-dev`.
-const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Assemble a version string like `0.1.0-dev (abc1234)`.
-fn version_long() -> String {
-    format!("{PKG_VERSION} ({GIT_HASH})")
-}
-
 // ---------------------------------------------------------------------------
 // Autonomy levels (samo-specific)
 // ---------------------------------------------------------------------------
 
 /// Autonomy level for the agent subsystem.
+///
+// TODO: Support per-feature granular syntax like `vacuum:auto,index_health:auto`
+// (SPEC section 8.6). The current `ValueEnum` handles global level only.
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
 enum Autonomy {
     /// Read-only: observe, diagnose, report. Zero writes.
@@ -36,6 +31,12 @@ enum Autonomy {
 // CLI definition
 // ---------------------------------------------------------------------------
 
+/// Assemble a long version string like `0.1.0-dev (abc1234)`.
+fn long_version() -> &'static str {
+    // Leak is fine: called once at startup, lives for the process lifetime.
+    Box::leak(format!("{} ({})", env!("CARGO_PKG_VERSION"), GIT_HASH).into_boxed_str())
+}
+
 /// Samo — self-driving Postgres agent and psql-compatible terminal.
 ///
 /// A psql-compatible interface with built-in AI and autonomous
@@ -43,7 +44,7 @@ enum Autonomy {
 #[derive(Parser, Debug)]
 #[command(
     name = "samo",
-    version = env!("CARGO_PKG_VERSION"),
+    version = long_version(),
     about = "Self-driving Postgres agent and psql-compatible terminal",
     long_about = None,
     // Disable auto-generated -h so we can use it for --host (psql compat).
@@ -56,6 +57,7 @@ struct Cli {
     help: Option<bool>,
 
     // -- Positional arguments (psql-compatible order) -----------------------
+    // Named flags (-d, -U, -h, -p) override positionals when both are given.
     /// Database name to connect to.
     #[arg(value_name = "DBNAME")]
     dbname_pos: Option<String>,
@@ -93,7 +95,16 @@ struct Cli {
     #[arg(short = 'W', long)]
     password: bool,
 
-    // -- Common psql flags (stubs) ------------------------------------------
+    /// Never prompt for password.
+    #[arg(short = 'w', long = "no-password")]
+    no_password: bool,
+
+    // -- Psql scripting flags -----------------------------------------------
+    /// Set psql variable (can be specified multiple times).
+    #[arg(short = 'v', long = "variable", value_name = "NAME=VALUE")]
+    variable: Vec<String>,
+
+    // -- Common psql flags --------------------------------------------------
     /// Run a single command (SQL or backslash) and exit.
     #[arg(short = 'c', long)]
     command: Option<String>,
@@ -122,6 +133,34 @@ struct Cli {
     #[arg(short = 'o', long)]
     output: Option<String>,
 
+    /// Field separator for unaligned output.
+    #[arg(short = 'F', long = "field-separator", value_name = "SEP")]
+    field_separator: Option<String>,
+
+    /// Record separator for unaligned output.
+    #[arg(short = 'R', long = "record-separator", value_name = "SEP")]
+    record_separator: Option<String>,
+
+    /// Log all query output to file.
+    #[arg(short = 'L', long = "log-queries", value_name = "FILE")]
+    log_queries: Option<String>,
+
+    /// Disable readline (no line editing).
+    #[arg(short = 'n', long = "no-readline")]
+    no_readline: bool,
+
+    /// Single-step mode: confirm each command before execution.
+    #[arg(short = 's', long = "single-step")]
+    single_step: bool,
+
+    /// Use NUL as field separator (unaligned output).
+    #[arg(short = 'z', long = "field-separator-zero")]
+    field_separator_zero: bool,
+
+    /// Use NUL as record separator (unaligned output).
+    #[arg(short = '0', long = "record-separator-zero")]
+    record_separator_zero: bool,
+
     /// Echo queries that samo generates internally.
     #[arg(short = 'E', long = "echo-hidden")]
     echo_hidden: bool,
@@ -145,6 +184,10 @@ struct Cli {
     /// Single-transaction mode: wrap all commands in BEGIN/COMMIT.
     #[arg(short = '1', long = "single-transaction")]
     single_transaction: bool,
+
+    /// Force interactive mode even when input is not a terminal.
+    #[arg(short = 'i', long)]
+    interactive: bool,
 
     /// CSV output format.
     #[arg(long)]
@@ -171,25 +214,44 @@ struct Cli {
     #[arg(long)]
     yolo: bool,
 
-    /// Launch in observe-only mode (read-only monitoring).
-    #[arg(long)]
-    observe: bool,
+    /// Launch in observe mode. Optionally accepts a duration (e.g. `30m`, `2h`).
+    /// With no value: observe indefinitely. With a value: observe then exit.
+    #[arg(long, value_name = "DURATION", default_missing_value = "", num_args = 0..=1)]
+    observe: Option<String>,
 
     /// Set agent autonomy level.
     #[arg(long, value_enum, default_value_t = Autonomy::Observe)]
     autonomy: Autonomy,
+
+    /// Run health check, exit with code reflecting severity (FR-13).
+    #[arg(long)]
+    check: bool,
+
+    /// Generate a full diagnostic report. Optionally specify format (text, json).
+    #[arg(long, value_name = "FORMAT", default_missing_value = "text", num_args = 0..=1)]
+    report: Option<String>,
+
+    /// Write structured logs to this file (FR-14).
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<String>,
+
+    /// Set log verbosity level (error, warn, info, debug, trace) (FR-14).
+    #[arg(long, value_name = "LEVEL")]
+    log_level: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
+// TODO: Replace #[tokio::main] with explicit runtime construction
+// to optimize thread count per operating mode (issue #2, finding #9).
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _cli = Cli::parse();
 
     // For now, just announce that the binary works.
-    println!("samo {} - not yet connected", version_long());
+    println!("samo {} - not yet connected", long_version());
 
     Ok(())
 }
