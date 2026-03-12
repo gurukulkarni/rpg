@@ -1,6 +1,6 @@
 # Samo
 
-> `psql` reimagined: a Postgres terminal with an AI brain.
+> The best terminal for diagnosing and fixing Postgres production issues.
 
 **Status:** Vision / pre-development  
 **Language:** Rust  
@@ -10,24 +10,26 @@
 
 ## What is this?
 
-A ground-up Rust replacement for `psql` that fuses four things that have never been combined:
+A self-driving Postgres agent that lives in your terminal. Four things that have never been combined:
 
-1. **A psql-compatible Postgres terminal** — full wire protocol, backslash commands, muscle memory intact
-2. **Batteries included** — pgcli-style autocomplete, pspg-style pager, postgres_dba diagnostics built in
-3. **An AI-powered terminal** — LLM inside, understands your schema, explains errors, writes and optimizes SQL
-4. **An autonomous agent control surface** — database health management with granular autonomy levels
+1. **An autonomous agent** — detects, diagnoses, and resolves database issues with per-feature autonomy levels and three-branch governance (Analyzer/Actor/Auditor)
+2. **An AI-powered terminal** — LLM inside, understands your schema, explains errors, writes and optimizes SQL, performs root cause analysis
+3. **Batteries included** — pgcli-style autocomplete, pspg-style pager, postgres_dba diagnostics built in
+4. **psql-compatible** — common psql workflows work out of the box, respecting 30 years of muscle memory
 
-Think: `psql` at the core, `pgcli` for UX, `warp` for AI, `openclaw` for connectivity.
+Think: `self-driving postgres` at the core, `pgcli` for UX, `warp` for AI, `openclaw` for connectivity.
 
 ---
 
 ## Why?
 
-`psql` is 30 years old. It's great. But it's a terminal from an era before AI, before observability platforms, before autonomous operations. Every Postgres user starts their day in `psql` — what if that terminal was also their most powerful diagnostic and operational tool?
+Every production Postgres incident follows the same painful loop: notice something's wrong, SSH in, run ad-hoc queries against pg_stat_activity, reconstruct what happened, figure out a fix, apply it, hope it works. This takes 30-60 minutes even for experienced DBAs.
 
-Meanwhile, AI coding tools (Cursor, Warp, Claude Code) have proven that putting an LLM *inside* the tool you already use is transformative. Nobody's done this for Postgres.
+What if your terminal could do that investigation in seconds, propose the fix, and — with your permission — apply it?
 
-**The opportunity:** Build the interface where human Postgres expertise meets autonomous AI operations.
+AI coding tools (Cursor, Warp, Claude Code) proved that putting an LLM *inside* the tool you already use is transformative. Nobody's done this for Postgres.
+
+**The opportunity:** Build the terminal where Postgres expertise meets autonomous AI operations. The psql compatibility gets you in the door; the self-driving capabilities keep you there.
 
 ---
 
@@ -35,55 +37,59 @@ Meanwhile, AI coding tools (Cursor, Warp, Claude Code) have proven that putting 
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  samo                       │
+│                       samo                          │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐   │
+│  │      Autonomous Agent (the differentiator)   │   │
+│  │                                              │   │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐     │   │
+│  │  │ ANALYZER │→│  ACTOR   │→│ AUDITOR  │     │   │
+│  │  │ (thinks) │ │(executes)│ │(verifies)│     │   │
+│  │  └──────────┘ └──────────┘ └──────────┘     │   │
+│  │                                              │   │
+│  │  Per-feature autonomy (A/G/P × 18 areas)    │   │
+│  │  RCA • Index Health • Vacuum • Config • ...  │   │
+│  │  Connectors: pg_ash │ CloudWatch/RDS         │   │
+│  │  Modes: interactive │ daemon                 │   │
+│  └──────────────────────────────────────────────┘   │
 │                                                     │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────┐  │
-│  │  L1: Core   │  │  L2: UX      │  │ L3: AI    │  │
+│  │  AI Engine  │  │  UX Layer    │  │  Core     │  │
 │  │             │  │              │  │           │  │
-│  │ Wire proto  │  │ Autocomplete │  │ LLM engine│  │
-│  │ \commands   │  │ Highlighting │  │ NL → SQL  │  │
-│  │ COPY/LOB    │  │ TUI pager    │  │ EXPLAIN   │  │
-│  │ .psqlrc     │  │ postgres_dba │  │ RCA       │  │
-│  │ Formatting  │  │ \dba bloat   │  │ /ask      │  │
-│  └──────┬──────┘  └──────┬───────┘  └─────┬─────┘  │
-│         │                │                │         │
-│  ┌──────┴────────────────┴────────────────┴─────┐   │
-│  │           L4: Agent / Connector              │   │
-│  │                                              │   │
-│  │  Autonomy engine (L1-L5)                     │   │
-│  │  Health protocols                            │   │
-│  │  pg_ash wait event analysis                  │   │
-│  │  Connectors: Datadog │ pganalyze │ RDS       │   │
-│  │              Supabase │ Jira │ GitHub         │   │
-│  │  Modes: interactive │ container/daemon        │   │
-│  └──────────────────────────────────────────────┘   │
+│  │ LLM engine  │  │ Autocomplete │  │ Wire proto│  │
+│  │ NL → SQL    │  │ Highlighting │  │ \commands │  │
+│  │ EXPLAIN     │  │ TUI pager    │  │ COPY/LOB  │  │
+│  │ RCA chain   │  │ \dba diags   │  │ .psqlrc   │  │
+│  │ /ask        │  │              │  │ Formatting│  │
+│  └─────────────┘  └──────────────┘  └───────────┘  │
 └─────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Layer 1: psql-Compatible Core
+## Core: psql-Compatible Terminal
 
-Full reimplementation of the psql experience in Rust.
+A Postgres terminal compatible with common psql workflows, reimplemented in Rust.
 
 ### Goals
 - **Postgres wire protocol v3** — connect, query, extended query protocol, SSL, SCRAM auth
-- **Backslash meta-commands** — `\d`, `\l`, `\dt`, `\di`, `\df`, `\du`, `\dp`, `\e`, `\i`, `\copy`, `\watch`, `\timing`, `\x`, `\pset`, and the long tail
+- **Backslash meta-commands** — the top 50 commands that cover daily use: `\d`, `\l`, `\dt`, `\di`, `\c`, `\x`, `\timing`, `\copy`, `\e`, `\i`, `\set`, `\watch`, and more
 - **Output formats** — aligned, unaligned, wrapped, CSV, HTML, LaTeX, JSON
 - **Session state** — variables (`\set`/`\unset`), prompts, ON_ERROR behavior
-- **`.psqlrc` support** — compatibility with existing configs
 - **COPY streaming** — `\copy` to/from with all format options
-- **Large objects** — `\lo_*` commands
 - **Tab completion** — SQL keywords, schema objects, file paths
 - **Piping & scripting** — `-c`, `-f`, stdin/stdout, `\g`, `\gset`, `\gexec`
+
+### Compatibility Policy
+- **Interactive daily use:** target parity with the top 50 psql commands
+- **Scripted automation:** only documented-compatible flags guaranteed
+- **Unsupported behavior:** fails loudly, never silently
+- 100% psql compatibility is a multi-year rabbit hole. Common workflows first, long tail later.
 
 ### Rust Foundations
 - `tokio-postgres` — async wire protocol
 - `rustyline` — readline with history, completion
 - `clap` — CLI argument parsing
-
-### Non-goal (initially)
-100% psql compatibility is a multi-year rabbit hole. Target **95% of daily usage** first. The obscure corners (`\crosstab`, `\lo_*`, some `\pset` options) come later.
 
 ---
 
@@ -156,9 +162,9 @@ samo=> /explain SELECT * FROM orders JOIN customers ON ...
 
 ---
 
-## Layer 4: Autonomous Agent
+## Autonomous Agent
 
-The differentiator — not just a terminal, but an agent control surface.
+The core differentiator — not just a terminal, but a self-driving Postgres agent.
 
 ### Per-Feature Autonomy (3 levels × N feature areas)
 
@@ -173,11 +179,10 @@ Each feature area (index health, vacuum, config tuning, upgrades, etc.) is indep
 Three isolated governance components (Analyzer → Actor → Auditor) ensure the decision-maker never has direct execution access.
 
 ### What the Agent Does
-- **Continuous health monitoring** — connect, collect metrics, detect anomalies
-- **Root cause analysis** — correlate pg_ash wait events, logs, metrics, locks
-- **Auto-remediation** — reindex, vacuum, tune parameters (within autonomy level)
-- **Protocol execution** — follow health improvement playbooks
-- **Issue tracking** — create/update issues in Jira, GitHub, GitLab with RCA and actions taken
+- **Root cause analysis** — reconstruct block trees, correlate pg_ash wait events with metrics and locks, produce structured RCA reports with three-tier mitigation (immediate/mid-term/long-term)
+- **Continuous health monitoring** — detect anomalies, session spikes, lock cascades, bloat, stale stats
+- **Auto-remediation** — cancel blockers, reindex, vacuum, tune GUCs (within autonomy level and DB permissions)
+- **Issue tracking** — create/update issues with full RCA evidence
 - **Escalation** — when something exceeds autonomy level, create a detailed ticket or alert
 
 ### Connectors
@@ -199,11 +204,11 @@ Three isolated governance components (Analyzer → Actor → Auditor) ensure the
 **Daemon/Container** — runs headless, follows protocols, reports via configured channels (Slack, email, GitHub issues). Deployable as a sidecar container next to your Postgres.
 
 ```bash
-# Interactive
-samo --host prod-db-01 --level L3
+# Interactive — agent assists in real-time
+samo --host prod-db-01 --autonomy rca:guardian,index_health:advisor
 
-# Daemon mode
-samo daemon --config /etc/samo/config.toml --level L2
+# Daemon mode — headless monitoring and remediation
+samo daemon --config /etc/samo/config.toml
 ```
 
 ---

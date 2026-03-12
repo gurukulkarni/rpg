@@ -2,16 +2,16 @@
 
 ## 1. Vision
 
-**A single Rust binary that replaces `psql` and becomes the primary interface between humans and Postgres — with an AI brain that can observe, analyze, act, and learn.**
+**The best terminal for diagnosing and fixing Postgres production issues — a single Rust binary with an AI brain that can observe, analyze, act, and learn.**
 
 The world's most popular database deserves a terminal built for 2026, not 1996. Samo is:
 
-- A **psql replacement** that respects 30 years of muscle memory
-- A **diagnostic powerhouse** with built-in DBA tooling
+- A **self-driving Postgres agent** that can detect, diagnose, and resolve database issues at configurable autonomy levels
+- A **diagnostic powerhouse** with built-in DBA tooling and root cause analysis
 - An **AI-native terminal** where natural language and SQL coexist
-- An **autonomous agent** that can manage database health at configurable autonomy levels
+- A **psql-compatible terminal** that respects 30 years of muscle memory
 
-The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
+The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust. The psql compatibility gets you in the door; the autonomous operations keep you there.
 
 ---
 
@@ -19,19 +19,43 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 
 ### Primary Goals
 
-1. **psql compatibility** — a user should be able to `alias psql=samo` and not notice for 95% of their workflow
-2. **Zero-dependency deployment** — single static binary, no runtime deps, runs everywhere psql runs
+1. **Self-driving Postgres** — autonomous detection, diagnosis, and resolution of database issues with per-feature autonomy levels
+2. **Root cause analysis** — LLM-assisted investigation of performance incidents, lock contention, and anomalies using pg_ash and pg_stat_*
 3. **AI-first UX** — natural language queries, error explanation, EXPLAIN interpretation, schema-aware suggestions
-4. **Autonomous operations** — configurable autonomy levels from read-only monitoring to full autopilot
-5. **Connector ecosystem** — pull data from and push actions to external systems (Datadog, pganalyze, RDS, Supabase, Jira, GitHub)
+4. **psql compatibility** — a Postgres terminal compatible with common psql workflows, so users can adopt it as their daily driver
+5. **Zero-dependency deployment** — single static binary, no runtime deps, runs everywhere psql runs
+6. **Connector ecosystem** — pull data from and push actions to external systems (pg_ash, pganalyze, CloudWatch)
+
+### Compatibility Policy
+
+Samo aims for compatibility with common psql workflows, not 100% behavioral parity:
+- **Interactive daily use:** target parity with the top 50 psql commands (see Appendix K for ranking)
+- **Scripted automation:** only documented-compatible flags/commands are guaranteed
+- **Unsupported psql behavior:** fails loudly, never silently — users always know when they hit an edge case
 
 ### Non-Goals (for v1)
 
+- Full psql parity (every obscure flag and edge case) — common workflows first, long tail later
 - GUI / web interface (terminal only)
 - Supporting non-Postgres databases
 - Replacing pg_dump / pg_restore / pg_basebackup
 - Full `.psqlrc` compatibility (partial is fine)
 - Mobile / embedded targets
+
+### Explicitly Deferred (Not in First Commercial Release)
+
+The following are architecturally planned but will **not** ship in the first release:
+
+- **Pilot mode** — all features start at Advisor or Guardian; Pilot ships only after sustained real-world validation
+- **Full psql parity** — rare meta-commands (`\lo_*`, `\crosstabview`), exotic `\pset` options, full `.psqlrc` compatibility, exact prompt format codes
+- **Internal pager advanced features** — mouse support, inline bar charts, column sorting by click
+- **Auto-drop of unused indexes** — even with grace periods, "unused" ≠ "safe to drop" (monthly jobs, failover paths, DR workloads)
+- **Major upgrade execution** — `major_upgrade` stays at Advisor (planning-only) indefinitely
+- **Plugin ABI / connector marketplace** — protocol marketplace and custom connector plugins
+- **Multi-database daemon orchestration** — single-database daemon first
+- **Broad connector ecosystem** — Jira, GitLab Issues, Datadog, pganalyze, Supabase connectors are deferred; v1 ships with pg_ash + pg_stat_statements + CloudWatch/RDS only
+- **Config tuning for restart-required GUCs** — v1 config_tuning covers safe runtime changes and reload-only GUCs only (not shared_buffers, WAL sizing)
+- **Statusline AI budget display** — token budget tracking in status bar
 
 ---
 
@@ -271,6 +295,7 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 - Token usage tracking and budget limits
 - `\set AI_PROVIDER`, `\set AI_MODEL`, `\set AI_API_KEY`
 - Works without AI configured (all AI features simply unavailable, no errors)
+- Commands that loop or stream heavily (`\watch`, large COPY, bulk queries) bypass the AI context window entirely — no tokens consumed for repetitive output
 
 #### FR-11: Autonomy Model — Per-Feature Levels + Three Branches of Governance
 
@@ -308,6 +333,36 @@ Each area is independently configurable:
 | **budgets** | Infrastructure cost analysis, right-sizing, reserved instance recommendations | "RDS r6g.2xlarge at $1,400/mo. CPU avg 12%, memory 45%. Suggest r6g.xlarge ($700/mo)" | Shows right-sizing plan, waits | Auto-alerts on cost anomalies, recommends changes |
 | **backup_monitoring** | Backup freshness, WAL archiving, PITR readiness | "Last backup 26h ago, SLA is 24h" | Proposes backup trigger, waits | Auto-alerts, can trigger backups |
 | **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Guardian (security changes never auto-pilot) |
+
+##### Evidence Classification
+
+Every autonomous finding must declare its evidence quality. This determines what autonomy levels are appropriate:
+
+| Class | Definition | Examples | Max Autonomy |
+|-------|-----------|----------|-------------|
+| **Factual** | Deterministic, directly observable from pg_catalog/pg_stat_* | Invalid indexes, idle-in-transaction sessions, replication lag bytes, XID age, lock cascades | Pilot |
+| **Heuristic** | Statistical inference, may have false positives | Unused indexes (stats may have been reset), missing indexes (based on seq_scan counts), bloat estimates (without pgstattuple), config right-sizing | Guardian (Pilot only after extended validation period) |
+| **Advisory** | Subjective assessment, depends on workload context | Schema health (naming conventions), long-term architecture suggestions, major upgrade planning | Advisor only |
+
+**Evidence contracts per feature area:**
+
+Each feature area must define:
+1. **Required data sources** — what pg_stat_*/pg_catalog views, extensions, or connectors are needed
+2. **Minimum evidence threshold** — what conditions must be met before a finding is reported (e.g., "unused index must have 0 scans across ≥2 stats resets spanning ≥30 days")
+3. **Confidence scoring** — findings below threshold produce hypotheses only, not recommendations
+4. **Safe actions** — operations that are low-risk and reversible (cancel query, REINDEX CONCURRENTLY, ANALYZE)
+5. **Unsafe actions** — operations that are high-risk or irreversible (DROP INDEX, ALTER TABLE, VACUUM FULL)
+6. **Rollback/verification** — how the Auditor confirms the action had the intended effect
+
+_Example — index_health sub-findings:_
+
+| Sub-finding | Class | Evidence Required | Safe Action | Unsafe Action |
+|---|---|---|---|---|
+| Invalid index | Factual | `pg_index.indisvalid = false` | DROP + CREATE INDEX CONCURRENTLY | — |
+| Bloated index (>30%) | Heuristic | `pgstattuple` or size-based estimate | REINDEX CONCURRENTLY | — |
+| Unused index | Heuristic | 0 scans, ≥2 stats resets, ≥30 days, no recent DDL | — | DROP INDEX CONCURRENTLY |
+| Missing index | Heuristic | seq_scan > threshold, table > 10K rows, query frequency from pg_stat_statements | CREATE INDEX CONCURRENTLY | — |
+| Redundant index | Heuristic | Column prefix match, size comparison | — | DROP INDEX CONCURRENTLY |
 
 **Default configuration:**
 ```toml
@@ -657,10 +712,18 @@ Borrowed from Claude Code and OpenClaw. Long-running database work needs session
 
 **Context compaction (from Claude Code / OpenClaw):**
 - AI conversation context grows over a session — queries, results, explanations accumulate
-- When context approaches model's token limit, auto-compact: summarize older conversation, keep recent
+- When context approaches model's token limit (70%), auto-compact: summarize older conversation, keep recent
 - `/compact` — manually trigger compaction with optional focus ("compact, keep focus on performance tuning")
 - `/clear` — clear AI conversation context entirely (keep connection, variables, history)
 - Compaction summary is persisted in session for resume
+- **Critical: separate conversational context from action state.** The LLM summarizes the *chat* (questions, explanations, discussion), but a strict, structured action log is maintained independently:
+  ```json
+  [
+    {"ts": "2026-03-12T14:23:01Z", "action": "REINDEX CONCURRENTLY idx_orders_created_at", "status": "success", "feature": "index_health"},
+    {"ts": "2026-03-12T14:24:02Z", "action": "SELECT pg_cancel_backend(14523)", "status": "success", "feature": "rca"}
+  ]
+  ```
+  This action log is **never summarized by the LLM** — only FIFO-evicted if it exceeds its allocated token budget. This prevents the LLM from hallucinating action details (exact DDL, index names, OIDs) during compaction.
 
 **Undo:**
 - `\undo` — undo the last AI-executed action
@@ -1142,6 +1205,7 @@ docker run -it ghcr.io/nikolays/samo
 - Autonomy actions: logged, auditable, reversible where possible
 - Daemon mode: drop privileges, chroot-able
 - No telemetry without explicit opt-in
+- `SAMO_OFFLINE=1` — global kill switch that severs all non-Postgres outbound network requests (no auto-update checks, no AI API calls, no connector calls). Critical for air-gapped and restricted VPC environments.
 
 #### NFR-4: Compatibility
 - Postgres 12-18 (and upcoming versions)
@@ -1526,9 +1590,13 @@ samo/
 
 ## 5. Implementation Plan
 
-### Phase 0: psql Replacement (Weeks 1-8)
+### Phase 0: psql-Compatible Terminal (Weeks 1-8)
 
-**Goal:** A drop-in psql replacement. No AI, no agent, no extras — just a Rust binary that does everything psql does. If a user can't `alias psql=samo` and keep working, this phase isn't done.
+**Goal:** A Postgres terminal compatible with common psql workflows. No AI, no agent, no extras — just a solid daily-driver CLI. Split into two sub-phases to ship differentiated value faster.
+
+#### Phase 0A: Daily-Driver CLI (Weeks 1-6)
+
+The commands and features that cover 95% of daily interactive use. Ship this first.
 
 **Week 1-2: Connect and Query**
 - [ ] Project scaffold: Cargo.toml, CI (GitHub Actions)
@@ -1614,6 +1682,10 @@ samo/
 - [ ] `\encoding [enc]` — show/set client encoding
 - [ ] `\password [user]` — change password (interactively)
 
+#### Phase 0B: Compatibility Hardening (Weeks 7-8)
+
+The long tail — less common commands, exotic formats, scripting edge cases. Important for adoption but not blocking differentiation.
+
 **Week 7-8: COPY, Execution Variants, Scripting, Output Formats**
 - [ ] `\copy ... FROM/TO` — client-side COPY with all format options (CSV, TEXT, BINARY, DELIMITER, HEADER, etc.)
   - [ ] `\copy ... FROM stdin` / `\copy ... TO stdout`
@@ -1685,7 +1757,7 @@ samo/
 - [ ] Transaction status in prompt
 - [ ] Conditional commands: `\if`, `\elif`, `\else`, `\endif` — scripting conditionals
 
-**Milestone:** Full psql replacement. Can `alias psql=samo`. All common commands work. Builds and runs on all 6 platform targets. No AI, no extras — just psql reimplemented.
+**Milestone:** A solid Postgres terminal compatible with common psql workflows. Phase 0A ships the daily-driver commands; Phase 0B hardens the compatibility long tail. Builds and runs on all 6 platform targets. No AI, no extras — just a great terminal for Postgres.
 
 ### Phase 1: Beyond psql (Weeks 9-14)
 
@@ -1912,7 +1984,30 @@ EVIDENCE:
 - It **acts immediately** (cancel/terminate the root blocker) if permissions allow
 - It **proposes GUC changes** that prevent recurrence (`idle_in_transaction_session_timeout`, `lock_timeout`, `statement_timeout`) — these are safe, well-understood settings
 - It **explains the long-term fix** (SKIP LOCKED pattern) with enough context that a developer can implement it
-- The entire investigation + mitigation happens in seconds, not the 30-60 minutes a human DBA would need
+- Fast guided investigation with optional mitigation — structured investigation in seconds vs. ad-hoc debugging in minutes
+
+**RCA confidence model:**
+
+Real production incidents are messy — missing extensions, stale stats, poolers, noisy workloads, multiple interacting symptoms, insufficient privileges. RCA must be honest about its confidence:
+
+| Confidence | Threshold | Behavior |
+|-----------|-----------|----------|
+| **High** (>80%) | Clear block tree, consistent wait events, corroborating metrics | Report finding + recommend mitigation |
+| **Medium** (40-80%) | Partial evidence, some ambiguity | Report finding as "likely cause" + recommend mitigation cautiously |
+| **Low** (<40%) | Insufficient data, conflicting signals, missing extensions | Report hypotheses only — no mitigation suggestions, no termination recommendations |
+
+- Below confidence threshold → report hypotheses only, never recommend mitigation
+- No immediate termination recommendation without high-confidence block-tree evidence
+- When pg_ash is unavailable, clearly communicate degraded mode and lower confidence ceiling
+
+**RCA two-tier product experience:**
+
+| Tier | Data Sources | Capabilities |
+|------|-------------|-------------|
+| **RCA Basic** | pg_stat_activity, pg_locks, pg_stat_statements | Snapshot-based investigation, block tree from current state, no historical timeline |
+| **RCA Full** | pg_ash + all of the above | Historical wait events, timeline reconstruction, query-level attribution, trend analysis |
+
+Demos, docs, and UX must make this distinction explicit so users don't assume the full experience is standard.
 
 **Investigation chain (generalized):**
 
