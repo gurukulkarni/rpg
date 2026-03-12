@@ -42,10 +42,14 @@ AI coding tools (Cursor, Warp, Claude Code) proved that putting an LLM *inside* 
 │  ┌──────────────────────────────────────────────┐   │
 │  │      Autonomous Agent — AAA Architecture     │   │
 │  │                                              │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐     │   │
-│  │  │ ANALYZER │→│  ACTOR   │→│ AUDITOR  │     │   │
-│  │  │ (thinks) │ │(executes)│ │(verifies)│     │   │
-│  │  └──────────┘ └──────────┘ └──────────┘     │   │
+│  │        ┌──────────┐                          │   │
+│  │        │ ANALYZER │ (thinks, plans)          │   │
+│  │        └──┬────┬──┘                          │   │
+│  │      ┌────▼┐ ┌─▼────────┐                   │   │
+│  │      │ACTOR│ │ AUDITOR  │ (reviews both)     │   │
+│  │      │(act)│ │(proposal │                    │   │
+│  │      └──┬──┘ │ + action)│                    │   │
+│  │         └───►└──────────┘                    │   │
 │  │                                              │   │
 │  │  Per-feature autonomy (A/G/P × 18 areas)    │   │
 │  │  RCA • Index Health • Vacuum • Config • ...  │   │
@@ -176,7 +180,7 @@ Each feature area (index health, vacuum, config tuning, upgrades, etc.) is indep
 | **S** | **Supervised** | Act with human approval. Proposes action, human confirms. |
 | **A** | **Auto** | Act autonomously within policy and DB permissions. Human notified after. |
 
-The **AAA Architecture** (Analyzer → Actor → Auditor) — three isolated governance components ensure the decision-maker never has direct execution access.
+The **AAA Architecture** (Analyzer / Actor / Auditor) — a triangle where the Auditor cross-cuts both, reviewing proposals *and* actions. The decision-maker never has direct execution access.
 
 ### What the Agent Does
 - **Root cause analysis** — reconstruct block trees, correlate pg_ash wait events with metrics and locks, produce structured RCA reports with three-tier mitigation (immediate/mid-term/long-term)

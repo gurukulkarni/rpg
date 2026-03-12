@@ -408,66 +408,98 @@ samo --autonomy vacuum:auto,bloat:auto,query_optimization:supervised  # granular
 
 ##### AAA Architecture — Three Branches of Governance
 
-The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor) — three isolated components, inspired by separation of powers:
+The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor) — a triangle of three isolated components where the Auditor cross-cuts both the Analyzer and Actor:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │              Samo AAA Architecture (Governance)               │
 │                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │  ANALYZER    │  │  ACTOR       │  │  AUDITOR     │       │
-│  │  (Analysis)  │  │  (Execution) │  │  (Oversight) │       │
-│  │              │  │              │  │              │       │
-│  │  Observes    │  │  Executes    │  │  Verifies    │       │
-│  │  Diagnoses   │  │  within      │  │  Reviews     │       │
-│  │  Recommends  │  │  boundaries  │  │  Improves    │       │
-│  │  Plans       │  │  Only acts   │  │  Catches     │       │
-│  │              │  │  on approved │  │  mistakes    │       │
-│  │              │  │  plans       │  │              │       │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘       │
-│         │                 │                 │                │
-│         │    proposes     │    reports to   │                │
-│         ├────────────────►│────────────────►│                │
-│         │                 │                 │                │
-│         │◄────────────────┤    feedback     │                │
-│         │  learns from    │◄────────────────┤                │
-│         │  audit results  │  catches errors │                │
-│  ───────┴─────────────────┴─────────────────┴────────        │
+│                    ┌──────────────┐                          │
+│                    │  ANALYZER    │                          │
+│                    │  (Analysis)  │                          │
+│                    │              │                          │
+│                    │  Observes    │                          │
+│                    │  Diagnoses   │                          │
+│                    │  Recommends  │                          │
+│                    │  Plans       │                          │
+│                    └──┬───────┬───┘                          │
+│            proposes   │       │  reviewed by                │
+│            action     │       │  Auditor                    │
+│                  ┌────▼──┐ ┌──▼───────────┐                 │
+│                  │ ACTOR │ │  AUDITOR     │                 │
+│                  │(Exec.)│ │  (Oversight) │                 │
+│                  │       │ │              │                 │
+│                  │Execute│ │ Reviews both:│                 │
+│                  │within │ │ • proposals  │                 │
+│                  │bounds │ │   (Analyzer) │                 │
+│                  │       │ │ • actions    │                 │
+│                  │       │ │   (Actor)    │                 │
+│                  │       │ │ • outcomes   │                 │
+│                  └───┬───┘ └──┬───────────┘                 │
+│                      │        │                             │
+│                      │  ◄─────┘ reviews actions             │
+│                      │          verifies outcomes            │
+│                      │          feeds back to Analyzer       │
+│  ────────────────────┴────────────────────────────────       │
 │                    Shared Action Log                          │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**1. ANALYZER (Legislative branch)**
+**The triangle, not a pipeline:** The Auditor is not downstream of the Actor — it sits beside both, reviewing the Analyzer's proposals *and* the Actor's execution. This holds at every autonomy level:
+
+| Level | Analyzer | Actor | Auditor |
+|-------|----------|-------|---------|
+| **Observe** | Diagnoses, reports | Inactive (zero writes) | Reviews proposals. Also reviews outcomes of actions *the human took* based on Samo's reports. |
+| **Supervised** | Proposes action | Executes after human approval | Reviews proposal *before* human sees it (pre-action audit). Reviews action results *after* execution (post-action audit). |
+| **Auto** | Proposes action | Executes per policy | Reviews proposal (pre-action). Reviews action results (post-action). Triggers circuit breaker if outcomes degrade. |
+
+**1. ANALYZER**
 - **Role:** Observe, diagnose, think, recommend, plan.
 - **Can:** Read all database state (pg_stat_*, pg_catalog, pg_ash, logs, metrics). Run read-only queries. Generate recommendations and plans.
 - **Cannot:** Execute any state-changing SQL. Period.
 - **Implementation:** This is where the LLM lives. It has full read access to understand the database but zero write access. Even in Auto mode, the Analyzer only produces a *plan* — it never executes directly.
 - **Output:** Structured recommendations with: finding, severity, evidence, proposed action, expected outcome, risk assessment.
 
-**2. ACTOR (Executive branch)**
+**2. ACTOR**
 - **Role:** Execute approved actions within strictly defined boundaries.
 - **Can:** Execute only the specific operations it has been granted (via `samo_ops` wrapper functions). Only acts on plans that have been approved (by human in Supervised mode, or by policy in Auto mode).
 - **Cannot:** Decide what to do. It has no intelligence — it's a constrained executor.
 - **Implementation:** A thin execution layer. Receives a structured action request, validates it against the permission model (DB-level GRANTs + wrapper functions), executes, reports result. No LLM, no decision-making.
 - **Key constraint:** The Actor is **a different component** from the Analyzer. They don't share memory or state. The Actor cannot be tricked by prompt injection because it doesn't process natural language — it only accepts structured, validated action requests.
 - **Isolation:** In Supervised mode, there's a human in the loop between Analyzer and Actor. In Auto mode, policy rules gate the handoff (but the Actor still validates against DB permissions).
+- **Inactive in Observe mode:** When autonomy is Observe, the Actor does not exist in the execution path. Zero writes, period.
 
-**3. AUDITOR (Judicial branch)**
-- **Role:** Verify actions, catch mistakes, provide feedback for learning.
+**3. AUDITOR**
+- **Role:** Independent reviewer of **both proposals and actions**. The Auditor is the quality gate for the entire system.
 - **Can:** Read all state (like Analyzer) + read the action log. Compare pre/post state. Flag anomalies.
-- **Cannot:** Execute anything. Advisory only.
-- **What it does:**
-  - **Pre-action audit:** Before Actor executes, Auditor validates the plan (is the diagnosis correct? is the action proportionate? are there risks the Analyzer missed?). In Supervised mode, the Auditor's assessment is shown to the human alongside the Analyzer's recommendation.
-  - **Post-action audit:** After Actor executes, Auditor verifies the outcome (did bloat actually decrease? did the index actually improve query performance? did the config change have the expected effect?).
-  - **Self-awareness loop:** Auditor tracks accuracy of past recommendations (was the diagnosis correct? did the action help?). This feedback feeds into improving the Analyzer's future recommendations.
-  - **Anomaly detection:** Flags unexpected outcomes (reindex made things worse, vacuum didn't reclaim space, config change degraded performance) and triggers rollback recommendations.
-- **Implementation:** Can be a separate LLM call with a different prompt (adversarial review), or rule-based checks, or both.
+- **Cannot:** Execute anything. Read-only + advisory.
+- **What it reviews:**
 
-**Why the AAA Architecture matters:**
-- **Prompt injection defense:** Even if an attacker crafts a malicious query result that tricks the Analyzer into recommending `DROP TABLE`, the Actor validates against DB-level permissions (can't drop), and the Auditor flags that a DROP recommendation is abnormal for a bloat check.
-- **Trust building:** Users can see each branch's output separately. The Auditor's independent assessment builds confidence in the Analyzer's recommendations.
-- **Learning loop:** The Auditor's post-action verification creates a feedback cycle that improves recommendations over time.
-- **Compliance:** Three-way separation of concerns is an auditor's dream for SOC2/ISO27001.
+  **A. Proposals (from Analyzer):**
+  - **Pre-action audit:** Before anyone acts (human or Actor), the Auditor validates the Analyzer's plan: is the diagnosis correct? Is the action proportionate? Are there risks the Analyzer missed? Wrong evidence? Hallucinated findings?
+  - In **Supervised** mode: the Auditor's assessment is shown to the human alongside the Analyzer's recommendation, so the human has two independent opinions.
+  - In **Auto** mode: the Auditor can veto a proposal before the Actor executes (if confidence is below threshold or the action is disproportionate to the finding).
+  - In **Observe** mode: the Auditor still reviews proposals — catches cases where the Analyzer's report to the human is wrong or misleading.
+
+  **B. Actions (from Actor or human):**
+  - **Post-action audit:** After execution, the Auditor verifies outcomes: did bloat actually decrease? Did the index improve query performance? Did the config change have the expected effect?
+  - In **Observe** mode: Samo doesn't act, but the human might. If Samo reported "idx_orders_legacy is unused, safe to drop" and the human dropped it, the Auditor monitors whether queries regressed after the drop. This closes the feedback loop even in read-only mode.
+  - In **Supervised/Auto** mode: the Auditor monitors the Actor's execution results and triggers rollback recommendations if outcomes degrade.
+
+  **C. Learning loop:**
+  - Tracks accuracy of past recommendations: was the diagnosis correct? Did the action help?
+  - Feedback feeds into improving the Analyzer's future recommendations.
+  - **Anomaly detection:** Flags unexpected outcomes (reindex made things worse, vacuum didn't reclaim space, config change degraded performance).
+  - In **Auto** mode: sustained poor outcomes trigger the circuit breaker (drop feature to Observe).
+
+- **Implementation:** Can be a separate LLM call with a different prompt (adversarial review), rule-based checks, or both. The key is independence — the Auditor must not share context/state with the Analyzer to avoid confirmation bias.
+
+**Why the AAA triangle matters:**
+- **Prompt injection defense:** Even if an attacker crafts a malicious query result that tricks the Analyzer into recommending `DROP TABLE`, the Auditor flags it as abnormal before anyone acts, and the Actor validates against DB-level permissions (can't drop).
+- **Trust building:** Users see the Auditor's independent assessment alongside the Analyzer's recommendation. Two opinions, not one.
+- **Observe mode isn't passive:** Even in read-only, the Auditor tracks whether human actions based on Samo's reports had good outcomes. This is how the system learns and earns trust before being promoted to Supervised.
+- **Learning loop:** The Auditor's post-action verification creates a feedback cycle that improves recommendations over time — regardless of who executed the action (human or Actor).
+- **Compliance:** Three-way separation of concerns with cross-cutting audit is an auditor's dream for SOC2/ISO27001.
 
 ##### Self-Driving Database Levels (Future Reference)
 
