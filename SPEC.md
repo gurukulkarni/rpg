@@ -290,37 +290,35 @@ Each area is independently configurable:
 
 | Feature Area | Description | Example A (Advisor) | Example G (Guardian) | Example P (Pilot) |
 |---|---|---|---|---|
-| **index_health** | Index bloat detection, reindexing | "idx_orders_created_at has 34% bloat, recommend REINDEX CONCURRENTLY" | Shows command, waits for approval, then runs | Auto-reindexes when bloat > threshold |
-| **vacuum** | Dead tuple management, vacuum scheduling | "orders table has 500K dead tuples, recommend VACUUM" | Proposes VACUUM, waits for approval | Auto-vacuums based on policy |
-| **config_tuning** | PostgreSQL parameter optimization | "shared_buffers is 128MB, recommend 4GB based on available RAM" | Shows ALTER SYSTEM SET, waits for approval | Auto-tunes safe parameters |
-| **query_cancel** | Long-running query management | "Query PID 12345 running for 45min, recommend cancel" | Shows pg_cancel_backend, waits | Auto-cancels queries exceeding threshold |
-| **query_terminate** | Connection termination | "Idle-in-transaction PID 6789 for 2h" | Shows pg_terminate_backend, waits | Auto-terminates based on policy |
-| **index_creation** | Missing index suggestions | "Sequential scan on orders.customer_id, suggest index" | Shows CREATE INDEX CONCURRENTLY, waits | Auto-creates indexes |
-| **index_removal** | Unused index cleanup | "idx_legacy unused for 90 days, suggest removal" | Shows DROP INDEX CONCURRENTLY, waits | Auto-drops after grace period |
-| **bloat_control** | Table bloat, VACUUM FULL, pg_repack | "users table 40% bloat, recommend pg_repack" | Shows command, waits | Auto-runs during maintenance window |
-| **minor_upgrade** | Minor Postgres version upgrades | "PG 16.2 → 16.4 available, security fixes" | Produces upgrade plan, waits | Auto-schedules upgrade |
-| **major_upgrade** | Major Postgres version upgrades | "PG 16 → 17, compatibility report" | Produces migration plan, waits | Auto-orchestrates (requires extensive testing first) |
-| **replication** | Replication slot management, lag | "Slot 'sub1' lag at 5GB, recommend drop" | Shows command, waits | Auto-manages slots |
-| **connection_mgmt** | Connection pool, idle cleanup | "Pool at 95%, 20 idle-in-transaction" | Shows plan, waits | Auto-manages connections |
-| **schema_health** | Data type issues, constraint gaps | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Advisory only — schema changes are always G max |
+| **vacuum** | Dead tuples, autovacuum health, freezing/wraparound prevention | "orders has 500K dead tuples, recommend VACUUM" | Proposes VACUUM, waits for approval | Auto-vacuums based on policy |
+| **bloat** | Table bloat (pg_repack, VACUUM FULL, CLUSTER), index bloat (REINDEX CONCURRENTLY) | "orders 40% table bloat; idx_orders_created_at 34% index bloat" | Shows pg_repack / REINDEX CONCURRENTLY, waits | Auto-runs during maintenance window |
+| **index_health** | Unused indexes, duplicate indexes, missing indexes, invalid indexes | "idx_legacy unused 90 days; seq scan on orders.customer_id" | Shows CREATE/DROP INDEX CONCURRENTLY, waits | Auto-creates/drops indexes |
+| **config_tuning** | PostgreSQL parameter optimization, pg_reload_conf | "shared_buffers is 128MB, recommend 4GB" | Shows ALTER SYSTEM SET, waits | Auto-tunes safe parameters |
+| **query_management** | Long-running query cancel, idle-in-transaction termination | "PID 12345 running 45min; PID 6789 idle-in-tx 2h" | Shows pg_cancel/terminate_backend, waits | Auto-cancels/terminates based on thresholds |
+| **connection_management** | Pool saturation, idle connection cleanup | "Pool at 95%, 20 idle connections" | Shows plan, waits | Auto-manages connections |
+| **replication** | Replication lag, slot management, failover | "Slot 'sub1' lag at 5GB" | Shows command, waits | Auto-manages slots |
+| **minor_upgrade** | Minor PG version upgrades (16.2 → 16.4) | "PG 16.4 available, 3 security fixes" | Produces upgrade plan, waits | Auto-schedules upgrade |
+| **major_upgrade** | Major PG version upgrades (16 → 17) | "PG 17 compatibility report" | Produces migration plan, waits | Auto-orchestrates (requires extensive testing) |
+| **schema_health** | Data type issues, constraint gaps, naming conventions | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Max level: Guardian (schema changes never auto-pilot) |
+| **backup_monitoring** | Backup freshness, WAL archiving, PITR readiness | "Last backup 26h ago, SLA is 24h" | Proposes backup trigger, waits | Auto-alerts, can trigger backups |
+| **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Guardian (security changes never auto-pilot) |
 
 **Default configuration:**
 ```toml
 [autonomy]
 # Per-feature levels: "advisor" | "guardian" | "pilot"
-index_health = "advisor"
 vacuum = "advisor"
+bloat = "advisor"
+index_health = "advisor"
 config_tuning = "advisor"
-query_cancel = "advisor"
-query_terminate = "advisor"
-index_creation = "advisor"
-index_removal = "advisor"
-bloat_control = "advisor"
+query_management = "advisor"
+connection_management = "advisor"
+replication = "advisor"
 minor_upgrade = "advisor"
 major_upgrade = "advisor"
-replication = "advisor"
-connection_mgmt = "advisor"
-schema_health = "advisor"     # max level: guardian (never auto-pilot for schema changes)
+schema_health = "advisor"        # max level: guardian
+backup_monitoring = "advisor"
+security = "advisor"             # max level: guardian
 ```
 
 **Presets for quick configuration:**
@@ -328,7 +326,7 @@ schema_health = "advisor"     # max level: guardian (never auto-pilot for schema
 samo --autonomy all:advisor          # everything in advisor mode (default, safest)
 samo --autonomy all:guardian         # everything needs approval
 samo --autonomy all:pilot            # full autopilot (use with caution)
-samo --autonomy vacuum:pilot,index_health:pilot,query_cancel:guardian  # granular
+samo --autonomy vacuum:pilot,bloat:pilot,query_management:guardian  # granular
 ```
 
 **CLI and runtime:**
@@ -463,13 +461,13 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
    index_health       | pilot    | ✓ reindex_concur.  | pilot
    vacuum             | pilot    | ✓ vacuum_table     | pilot
    config_tuning      | guardian | ✓ alter_system_set | guardian
-   query_cancel       | pilot    | ✓ cancel_query     | pilot
+   query_management       | pilot    | ✓ cancel_query     | pilot
    index_creation     | guardian | ✗ not granted      | advisor ⚠
    index_removal      | guardian | ✗ not granted      | advisor ⚠
    major_upgrade      | advisor  | N/A                | advisor
 
    ⚠ 2 features downgraded due to missing DB permissions.
-   Run 'samo setup --features index_creation,index_removal --generate-wrappers'
+   Run 'samo setup --features index_health --generate-wrappers'
    ```
 
 7. **Autonomy clamping** — if the config says Pilot but the DB role lacks permissions, the effective level is downgraded and the user is warned.
@@ -1023,7 +1021,7 @@ database = "myapp"
 user = "samo_agent"
 sslmode = "verify-full"
 sslrootcert = "~/.ssl/rds-ca.pem"
-autonomy = "vacuum:pilot,index_health:pilot,query_cancel:guardian"
+autonomy = "vacuum:pilot,index_health:pilot,query_management:guardian"
 ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
 ```
 
@@ -1735,7 +1733,7 @@ samo/
 
 **Week 29-30:**
 - [ ] GitHub Issues connector
-- [ ] Pilot level implementation for safe features (vacuum, index_health, query_cancel)
+- [ ] Pilot level implementation for safe features (vacuum, index_health, query_management)
 - [ ] Approval workflow: interactive confirmation for high-risk actions
 - [ ] Maintenance window awareness
 
