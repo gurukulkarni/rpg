@@ -301,6 +301,11 @@ Each area is independently configurable:
 | **major_upgrade** | Major PG version upgrades (16 → 17) | "PG 17 compatibility report" | Produces migration plan, waits | Auto-orchestrates (requires extensive testing) |
 | **schema_health** | Data type issues, constraint gaps, naming conventions | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Max level: Guardian (schema changes never auto-pilot) |
 | **rca** | Root cause analysis — LLM-assisted investigation using pg_ash, pg_stat_*, logs | "Lock:tuple spike at 14:01, 68% of waits. Caused by concurrent UPDATEs on orders table. Suggest: review application locking pattern, consider SKIP LOCKED." | Produces RCA report + mitigation plan, waits | Auto-investigates anomalies, proposes mitigations, can auto-apply safe fixes |
+| **partitioning** | Automated partition creation, detach/archive old partitions, partition-wise planning | "orders has 50M rows, no partitioning. Suggest range partition by created_at (monthly)" | Shows partition DDL + migration plan, waits | Auto-creates future partitions, auto-detaches old ones per policy |
+| **sharding** | Shard key analysis, shard rebalancing, cross-shard query detection | "Table 'events' is 500GB on single node. Shard key candidate: tenant_id (high cardinality, even distribution)" | Produces sharding plan, waits | Max level: Guardian (sharding changes never auto-pilot) |
+| **corruption** | Data corruption detection (checksums, pg_amcheck), repair guidance | "Page checksum failure in orders at block 42891. 3 rows affected." | Proposes repair strategy (REINDEX, pg_surgery, restore from backup), waits | Auto-detects via periodic checks, auto-alerts. Max repair level: Guardian |
+| **data_lifecycle** | Archiving, purging, retention policies, cold storage | "audit_log has 2B rows, 800GB. Rows older than 2 years: 1.2B. Suggest archive + purge." | Shows archive/purge plan with retention rules, waits | Auto-archives/purges per configured retention policy |
+| **cost** | Infrastructure cost analysis, right-sizing, reserved instance recommendations | "RDS r6g.2xlarge at $1,400/mo. CPU avg 12%, memory 45%. Suggest r6g.xlarge ($700/mo)" | Shows right-sizing plan, waits | Auto-alerts on cost anomalies, recommends changes |
 | **backup_monitoring** | Backup freshness, WAL archiving, PITR readiness | "Last backup 26h ago, SLA is 24h" | Proposes backup trigger, waits | Auto-alerts, can trigger backups |
 | **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Guardian (security changes never auto-pilot) |
 
@@ -316,6 +321,11 @@ query_optimization = "advisor"
 connection_management = "advisor"
 replication = "advisor"
 rca = "advisor"
+partitioning = "advisor"
+sharding = "advisor"             # max level: guardian
+corruption = "advisor"           # max repair level: guardian
+data_lifecycle = "advisor"
+cost = "advisor"
 minor_upgrade = "advisor"
 major_upgrade = "advisor"
 schema_health = "advisor"        # max level: guardian
