@@ -226,6 +226,132 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 - Dry-run mode: show what *would* be done without doing it
 - Approval workflow: L4/L5 actions can require interactive approval
 
+#### FR-11a: Permission Model (Database-Level Enforcement)
+
+Autonomy levels (FR-11) define what the **application** considers allowed. But the real enforcement happens at the **Postgres level** through the privilege system. The tool connects as a specific database user, and that user's GRANTs define the hard boundary of what's possible — regardless of what the application-level autonomy config says.
+
+**Principle:** Two-layer security. The application layer (L1-L5) is a policy filter. The database layer (GRANT/REVOKE + wrapper functions) is the enforcement mechanism. Even if the app layer has a bug, the database won't let the tool do anything its user can't do.
+
+**How it works:**
+
+1. **Dedicated database role** — the tool connects as a purpose-built role (e.g., `alpha_agent`), not as a superuser, not as the application owner.
+
+2. **Fine-grained GRANTs** — the DBA grants exactly what the tool is allowed to do:
+   ```sql
+   -- L3: can ANALYZE, VACUUM, REINDEX CONCURRENTLY, cancel queries
+   GRANT pg_stat_scan_tables TO alpha_agent;
+   GRANT USAGE ON SCHEMA public TO alpha_agent;
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO alpha_agent;
+   -- But NOT: CREATE, DROP, ALTER, TRUNCATE, DELETE, INSERT, UPDATE
+   ```
+
+3. **PL/pgSQL wrapper functions with SECURITY DEFINER** — for operations that need elevated privileges but should be constrained:
+   ```sql
+   -- Wrapper: allows REINDEX CONCURRENTLY on any index, but nothing else
+   CREATE OR REPLACE FUNCTION alpha_ops.reindex_concurrently(p_index regclass)
+   RETURNS void
+   LANGUAGE plpgsql
+   SECURITY DEFINER  -- runs as the function owner (superuser/owner)
+   SET search_path = pg_catalog
+   AS $$
+   BEGIN
+     -- Validate: only indexes, not tables
+     IF NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = p_index AND relkind = 'i') THEN
+       RAISE EXCEPTION 'Not an index: %', p_index;
+     END IF;
+     EXECUTE format('REINDEX INDEX CONCURRENTLY %I.%I',
+       (SELECT nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = p_index),
+       (SELECT relname FROM pg_class WHERE oid = p_index));
+   END;
+   $$;
+   GRANT EXECUTE ON FUNCTION alpha_ops.reindex_concurrently(regclass) TO alpha_agent;
+   ```
+
+4. **dblink / postgres_fdw for non-transactional operations** — some operations (like `REINDEX CONCURRENTLY`, `CREATE INDEX CONCURRENTLY`, `VACUUM`) cannot run inside a transaction block. Wrapper functions use `dblink` or `postgres_fdw` to execute these in a separate connection:
+   ```sql
+   -- Wrapper using dblink for operations that can't run in a transaction
+   CREATE OR REPLACE FUNCTION alpha_ops.vacuum_table(p_table regclass)
+   RETURNS void
+   LANGUAGE plpgsql
+   SECURITY DEFINER
+   AS $$
+   DECLARE
+     v_schema text;
+     v_table text;
+   BEGIN
+     SELECT nspname, relname INTO v_schema, v_table
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_table AND c.relkind IN ('r', 'm');
+     IF NOT FOUND THEN
+       RAISE EXCEPTION 'Not a table: %', p_table;
+     END IF;
+     PERFORM dblink('dbname=' || current_database(),
+       format('VACUUM %I.%I', v_schema, v_table));
+   END;
+   $$;
+   ```
+
+5. **Dynamic wrapper generation** — during the setup/permission review phase, the tool can generate the appropriate wrapper functions based on the desired autonomy level:
+   ```
+   alpha setup --level L3 --generate-wrappers
+   -- Outputs SQL to create the alpha_ops schema, role, wrapper functions, and GRANTs
+   -- DBA reviews and applies
+   
+   alpha setup --level L4 --generate-wrappers
+   -- Generates additional wrappers for CREATE/DROP INDEX CONCURRENTLY, VACUUM FULL, etc.
+   ```
+
+6. **Permission introspection** — the tool checks what it can actually do on connect:
+   ```
+   alpha=> \permissions
+   Role: alpha_agent
+   Database: production
+   
+   Effective permissions:
+     ✓ SELECT on all tables (public, analytics)
+     ✓ ANALYZE (via alpha_ops.analyze_table)
+     ✓ VACUUM (via alpha_ops.vacuum_table)
+     ✓ REINDEX CONCURRENTLY (via alpha_ops.reindex_concurrently)
+     ✓ pg_cancel_backend (via alpha_ops.cancel_query)
+     ✗ CREATE INDEX — not granted (would need L4 wrappers)
+     ✗ DROP — not granted
+     ✗ ALTER SYSTEM — not granted
+     ✗ pg_terminate_backend — not granted
+   
+   Autonomy config: L3
+   Effective autonomy: L3 (all L3 operations available)
+   ```
+
+7. **Autonomy level clamping** — if the app config says L4 but the database role only has L3 permissions, the tool operates at L3 and warns:
+   ```
+   WARNING: Autonomy level L4 requested but database role 'alpha_agent' 
+   lacks permissions for L4 operations (CREATE INDEX, DROP INDEX, VACUUM FULL).
+   Effective autonomy: L3
+   Run 'alpha setup --level L4 --generate-wrappers' to generate the required SQL.
+   ```
+
+**Schema layout:**
+```
+alpha_ops                    -- dedicated schema for wrapper functions
+├── analyze_table(regclass)  -- SECURITY DEFINER, L3
+├── vacuum_table(regclass)   -- SECURITY DEFINER + dblink, L3
+├── reindex_concurrently(regclass)  -- SECURITY DEFINER + dblink, L3
+├── cancel_query(int)        -- SECURITY DEFINER, L3
+├── create_index_concurrently(text)  -- SECURITY DEFINER + dblink, L4
+├── drop_index_concurrently(regclass)  -- SECURITY DEFINER + dblink, L4
+├── vacuum_full_table(regclass)  -- SECURITY DEFINER + dblink, L4
+├── terminate_backend(int)   -- SECURITY DEFINER, L4
+├── alter_system_set(text, text)  -- SECURITY DEFINER, L4 (with parameter allowlist)
+├── reload_conf()            -- SECURITY DEFINER, L3
+└── ...                      -- dynamically generated based on level
+```
+
+**Why this matters:**
+- **Cloud environments** (RDS, Cloud SQL, Supabase) don't give superuser access. Wrapper functions work within managed Postgres constraints.
+- **SOC2/compliance** — the audit trail is in Postgres's own `pg_audit` log, not just the app log. The database itself enforces what the tool can do.
+- **Defense in depth** — a prompt injection that tricks the AI layer into generating a `DROP TABLE` will fail at the database level because the role can't execute it.
+- **Gradual trust** — start with L1 (read-only role, no wrappers), add wrappers as trust builds, same as the autonomy philosophy.
+
 #### FR-12: Connectors
 
 **pg_ash (native):**
@@ -940,13 +1066,14 @@ alpha=> \dba bloat
 - Multi-line SQL with continuation prompt
 - Tab completes schema objects and keywords
 - This is what psql users expect
+- No AI dependency — works fully offline, no API keys needed
 
-#### AI Mode
+#### text2sql Mode
 
-Input is treated as natural language. The AI interprets intent and generates SQL, runs diagnostics, or takes action.
+Input is treated as natural language. The AI translates intent into SQL, shows it, and optionally executes.
 
 ```
-alpha ai> show me the 10 biggest tables
+alpha text2sql> show me the 10 biggest tables
 -- Generating SQL...
 SELECT schemaname, tablename, 
        pg_total_relation_size(schemaname || '.' || tablename) AS total_size
@@ -955,35 +1082,46 @@ ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC
 LIMIT 10;
 -- Run this query? [Y/n/edit]
 
-alpha ai> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
+alpha text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
 -- Analyzing...
 -- The orders table has 12M rows but no index on created_at.
 -- Currently doing a sequential scan (cost: 847291).
 -- Recommendation: CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders(created_at);
--- Create this index? [Y/n] (autonomy: L3+ required)
+-- Create this index? [Y/n] (requires L3+ permissions)
+
+alpha text2sql> fix index bloat on the orders table
+-- Checking orders table indexes...
+-- idx_orders_created_at: 34% bloat (450MB → should be ~300MB)
+-- idx_orders_customer_id: 12% bloat (OK)
+-- Plan:
+--   1. SELECT alpha_ops.reindex_concurrently('idx_orders_created_at'::regclass);
+-- Execute? [Y/n/edit]
 ```
 
-- Prompt changes: `dbname ai>`
-- Everything is interpreted as natural language
-- AI generates SQL, shows it, asks before executing (unless in YOLO mode)
-- Can still run raw SQL by prefixing with `\sql` or `;`
-- Tab completes common intents: "show me...", "why is...", "fix...", "optimize..."
+- Prompt changes: `dbname text2sql>`
+- Everything typed is interpreted as natural language
+- AI generates SQL, **always shows it before executing** (unless in YOLO execution mode)
+- Generated SQL respects the permission model — uses wrapper functions when direct access isn't available
+- Can still run raw SQL by prefixing with `;` or `\sql`
+- Tab completes common intents: "show me...", "why is...", "fix...", "optimize...", "compare..."
+- Requires AI backend configured (errors clearly if not)
 
 #### Switching Modes
 
 ```
 -- From SQL mode:
-\ai                     -- switch to AI mode
+\text2sql               -- switch to text2sql mode
+\t2s                    -- short alias
 -- or just prefix a single query:
-/ask show me table sizes -- one-shot AI, stays in SQL mode
+/ask show me table sizes -- one-shot text2sql, stays in SQL mode
 
--- From AI mode:
+-- From text2sql mode:
 \sql                    -- switch back to SQL mode
 -- or prefix raw SQL:
-;SELECT 1               -- one-shot SQL, stays in AI mode
+;SELECT 1               -- one-shot SQL, stays in text2sql mode
 
 -- Toggle:
-Ctrl-T                  -- toggle between SQL and AI mode (like Ctrl-X in nano)
+Ctrl-T                  -- toggle between SQL and text2sql mode
 ```
 
 ### 8.2 Execution Modes
@@ -1101,8 +1239,8 @@ Modes are orthogonal — any input mode works with any execution mode:
 
 | | **Interactive** | **Plan** | **YOLO** | **Observe** |
 |---|---|---|---|---|
-| **SQL mode** | Classic psql + AI suggestions | N/A (SQL is explicit) | N/A (SQL is explicit) | Read-only psql |
-| **AI mode** | AI generates, you approve | AI plans, you review | AI does everything | AI watches, you learn |
+| **SQL mode** | Classic psql (default) | N/A (SQL is explicit) | N/A (SQL is explicit) | Read-only psql |
+| **text2sql mode** | AI generates, you approve | AI investigates, produces plan | AI does everything within permissions | AI watches, you learn |
 
 ### 8.4 Prompt Indicators
 
@@ -1110,32 +1248,33 @@ The prompt tells you exactly what mode you're in:
 
 ```
 mydb=>                   -- SQL + Interactive (default)
-mydb ai>                 -- AI + Interactive
-mydb plan>               -- AI + Plan
-mydb yolo>               -- AI + YOLO
+mydb text2sql>           -- text2sql + Interactive
+mydb plan>               -- text2sql + Plan
+mydb yolo>               -- text2sql + YOLO
 mydb observe>            -- Observe
 mydb [L3]=>              -- SQL + Interactive, autonomy L3 shown
-mydb [L3] ai>            -- AI + Interactive, autonomy L3
-mydb [L3] yolo>          -- AI + YOLO, autonomy L3
+mydb [L3] text2sql>      -- text2sql + Interactive, autonomy L3
+mydb [L3] yolo>          -- text2sql + YOLO, autonomy L3
 ```
 
 ### 8.5 Slash Commands for Mode Control
 
 ```
-\ai                      -- switch to AI input mode
+\text2sql / \t2s         -- switch to text2sql input mode
 \sql                     -- switch to SQL input mode (default)
 \plan                    -- enter plan execution mode
 \yolo                    -- enter YOLO execution mode
 \interactive             -- return to interactive execution mode (default)
 \observe [duration]      -- enter observe mode (optional time limit)
 \level L1|L2|L3|L4|L5   -- set autonomy level
-\mode                    -- show current mode summary
+\permissions             -- show effective permissions (role GRANTs + wrapper functions)
+\mode                    -- show current mode summary (input mode + execution mode + autonomy + permissions)
 ```
 
 ### 8.6 CLI Flags
 
 ```bash
-alpha --ai               # start in AI mode
+alpha --text2sql         # start in text2sql mode
 alpha --plan             # start in plan mode
 alpha --yolo --level L3  # YOLO with L3 autonomy
 alpha --observe 30m      # observe for 30 minutes, then exit
