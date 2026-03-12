@@ -981,6 +981,74 @@ alpha @production     # connect using 'production' profile (with SSH tunnel)
 - `\profiles` — list all configured profiles
 - Autonomy level can be pinned per profile (production ≠ development)
 
+#### FR-28: Installation and Auto-Update
+
+Installation must be trivially easy on all platforms. Upgrading must be effortless.
+
+**Install methods (all platforms):**
+
+```bash
+# One-liner install (Linux, macOS)
+curl -sL https://get.project-alpha.dev | sh
+
+# Homebrew (macOS, Linux)
+brew install alpha
+
+# Windows — native installer
+winget install alpha
+# or
+choco install alpha
+# or
+scoop install alpha
+
+# npm/bun (if TypeScript)
+npm install -g alpha-cli
+bun install -g alpha-cli
+
+# Cargo (if Rust)
+cargo install alpha-cli
+
+# Docker
+docker run -it ghcr.io/nikolays/alpha
+
+# Direct binary download
+# GitHub Releases with platform-specific binaries
+```
+
+**Install script behavior:**
+- Detects OS and architecture automatically
+- Downloads correct binary from GitHub Releases
+- Installs to `~/.local/bin` (Linux), `/usr/local/bin` (macOS), or `%LOCALAPPDATA%\alpha` (Windows)
+- Adds to PATH if needed (with user confirmation)
+- Verifies checksum (SHA256)
+- Shows version after install
+- Non-interactive mode for CI: `curl -sL https://get.project-alpha.dev | sh -s -- --yes`
+
+**Auto-update:**
+- `alpha update` — check for and install latest version
+- `alpha update --check` — check only, don't install
+- Background update check: on startup, check for new version (async, non-blocking, max 1 check per 24h)
+- Notification: `A new version is available (v0.3.0 → v0.4.0). Run 'alpha update' to upgrade.`
+- Auto-update mode (opt-in): automatically download and apply updates
+  ```toml
+  [update]
+  auto_check = true          # check on startup (default: true)
+  auto_install = false       # auto-install updates (default: false, opt-in)
+  check_interval_hours = 24  # how often to check
+  channel = "stable"         # stable | beta | nightly
+  ```
+- Update channels: stable (default), beta (pre-release), nightly (CI builds)
+- Rollback: `alpha update --rollback` — revert to previous version (keeps one previous binary)
+- Update mechanism:
+  - Self-replacing binary (download new binary, replace old, restart)
+  - On Windows: download to temp, schedule replace on next launch (can't replace running binary)
+  - Respects package manager: if installed via brew/cargo/npm, suggest using that manager instead
+
+**Version management:**
+- `alpha --version` — show version, build info, platform
+- `alpha version` — detailed: version, commit hash, build date, platform, linked libraries
+- Version string embedded at compile time
+
 ### 3.2 Non-Functional Requirements
 
 #### NFR-1: Performance
@@ -1018,69 +1086,204 @@ alpha @production     # connect using 'production' profile (with SSH tunnel)
 
 ## 4. Architectural Choices
 
-### 4.1 Language: Rust
+### 4.1 Language: ⚠️ DECISION REQUIRED — Rust vs TypeScript/Bun
 
-**Why Rust:**
-- Single static binary (no Python/Ruby/Node runtime)
-- Predictable performance, no GC pauses
+This is the most consequential architectural decision. Needs research and a final call before Phase 0 begins.
+
+#### Option A: Rust
+
+**Pros:**
+- Single static binary, no runtime dependency — `curl | sh` delivers one file
+- Predictable performance, no GC pauses — matters for large result sets (1M+ rows)
 - Memory safety without runtime overhead
 - Excellent async ecosystem (tokio)
-- Cross-compilation story is mature
+- Cross-compilation to all 6 targets is mature and proven
+- Binary size ~15-25MB stripped
+- Startup time < 50ms
 - Growing Postgres ecosystem (pgx/pgrx community)
+- Credibility signal: "written in Rust" carries weight with the infra/DBA audience
+- Wire protocol: `tokio-postgres` is battle-tested
 
-**Why not C (like psql):** Memory safety, dependency management, async complexity.
-**Why not Go:** Less control over memory layout, larger binaries, GC pauses during large result rendering.
-**Why not Python (like pgcli):** Startup time, distribution pain, performance ceiling.
+**Cons:**
+- Development velocity is 2-3x slower than TypeScript for feature-heavy work
+- TUI ecosystem is less mature than Node (ratatui vs ink/blessed)
+- Hiring: harder to find Rust contributors
+- Compile times: 2-5 min for full build, slows iteration
+- AI/LLM library ecosystem is weaker (most SDKs are Python/TypeScript first)
+- Autocomplete/highlighting: more work to implement from scratch
+- Error handling verbosity (Result<T,E> everywhere)
 
-### 4.2 Async Runtime: Tokio
+**Rust crate ecosystem:**
+| Need | Crate | Maturity |
+|------|-------|----------|
+| Wire protocol | `tokio-postgres` | ★★★★★ |
+| Readline | `rustyline` | ★★★★☆ |
+| TUI | `ratatui` | ★★★★☆ |
+| HTTP | `reqwest` | ★★★★★ |
+| CLI args | `clap` | ★★★★★ |
+| Syntax highlight | `syntect` / `tree-sitter` | ★★★★☆ |
+| Config | `serde` + `toml` | ★★★★★ |
+| SSH | `russh` | ★★★☆☆ |
+| SQLite | `rusqlite` | ★★★★★ |
 
+#### Option B: TypeScript/Bun
+
+**Pros:**
+- Development velocity: 2-3x faster for feature-heavy work (AI integration, connectors, TUI)
+- Bun ships as single binary with bundled runtime (~90MB but self-contained)
+- `bun compile` produces standalone executables for all platforms
+- npm/bun ecosystem is massive — AI SDKs (OpenAI, Anthropic), HTTP, SSH, everything has first-class packages
+- TUI: ink (React for CLIs), blessed-contrib, terminal-kit are mature
+- Postgres: `postgres` (porsager/postgres) or `pg` are battle-tested
+- Hot reload during development — much faster iteration
+- JSON-native — natural for AI responses, API connectors, config
+- Team familiarity: most developers know TypeScript
+- OpenClaw is TypeScript/Bun — shared infrastructure and patterns
+- Hiring: vast TypeScript talent pool
+
+**Cons:**
+- Runtime dependency: Bun binary is ~90MB (standalone binary includes runtime)
+- Startup time: ~100-200ms (acceptable but not as snappy as Rust)
+- Memory usage: higher baseline (~50-80MB vs ~10-30MB for Rust)
+- GC pauses: possible during large result set rendering (mitigatable with streaming)
+- No static binary in the traditional sense — `bun compile` bundles the runtime
+- Cross-compilation: Bun's `--target` flag supports limited targets (needs verification for all 6)
+- Wire protocol: Node `pg` uses libpq bindings or pure JS — less control than `tokio-postgres`
+- Perception: "a psql replacement in JavaScript" may raise eyebrows with the DBA audience
+- Windows ARM: Bun support is newer, may have edge cases
+
+**Bun/TypeScript ecosystem:**
+| Need | Package | Maturity |
+|------|---------|----------|
+| Wire protocol | `postgres` (porsager) | ★★★★★ |
+| Wire protocol | `pg` | ★★★★★ |
+| Readline | `readline` / `@inquirer/prompts` | ★★★★☆ |
+| TUI | `ink` / `blessed` / `terminal-kit` | ★★★★☆ |
+| HTTP | `fetch` (built-in) | ★★★★★ |
+| CLI args | `commander` / `yargs` | ★★★★★ |
+| Syntax highlight | `highlight.js` / `shiki` | ★★★★☆ |
+| Config | built-in JSON/TOML parsers | ★★★★★ |
+| SSH | `ssh2` | ★★★★☆ |
+| SQLite | `bun:sqlite` (built-in) | ★★★★★ |
+| AI SDKs | `openai`, `@anthropic-ai/sdk` | ★★★★★ |
+
+#### Comparison Matrix
+
+| Factor | Rust | TypeScript/Bun |
+|--------|------|----------------|
+| Binary size | ~20MB | ~90MB (bundled runtime) |
+| Startup time | < 50ms | ~150ms |
+| Memory baseline | ~20MB | ~60MB |
+| Dev velocity | ★★★☆☆ | ★★★★★ |
+| AI/LLM integration | ★★★☆☆ | ★★★★★ |
+| Wire protocol control | ★★★★★ | ★★★★☆ |
+| Cross-platform | ★★★★★ (6/6 proven) | ★★★★☆ (needs Windows ARM verification) |
+| TUI/REPL | ★★★★☆ | ★★★★☆ |
+| Connector development | ★★★☆☆ | ★★★★★ |
+| DBA audience credibility | ★★★★★ | ★★★☆☆ |
+| Hiring/contributors | ★★★☆☆ | ★★★★★ |
+| Distribution ease | ★★★★★ (static binary) | ★★★★☆ (bun compile) |
+| Install script | trivial (one binary) | trivial (one binary via bun compile) |
+| Auto-update | trivial (replace binary) | trivial (replace binary) |
+
+#### Hybrid Option C: TypeScript/Bun core + Rust for performance-critical parts
+
+- Main application in TypeScript/Bun (AI, connectors, TUI, REPL)
+- Rust NAPI modules for: wire protocol, result formatting, syntax highlighting
+- Best of both worlds but adds build complexity
+- Precedent: many Node tools use native addons (e.g., `esbuild` is Go, `swc` is Rust)
+
+#### Research Tasks Before Decision
+
+- [ ] Verify Bun `--compile --target` for all 6 platforms (especially Windows ARM, Linux ARM musl)
+- [ ] Benchmark Bun vs native psql for large result set rendering (100K+ rows)
+- [ ] Prototype: basic REPL + connect + query in both Rust and Bun, compare LOC and dev time
+- [ ] Test Bun standalone binary startup time on cold start vs warm start
+- [ ] Evaluate `porsager/postgres` for wire protocol completeness (COPY, LISTEN/NOTIFY, CancelRequest)
+- [ ] Check Bun's readline/TTY support on Windows (rustyline equivalent)
+- [ ] Survey DBA/Postgres community sentiment on TypeScript vs Rust tooling
+
+#### Recommendation (preliminary, pending research)
+
+**Lean TypeScript/Bun** unless the research shows blockers. Rationale:
+- The AI and connector layers are 60%+ of the differentiated value, and TypeScript is dramatically faster to develop there
+- Bun's compiled output is a single binary — distribution is nearly as clean as Rust
+- The performance-sensitive path (rendering large results) can be optimized with streaming, and Bun is fast enough for interactive terminal use
+- Developer velocity matters more than binary size for an early-stage product
+- psql compatibility is mostly about protocol handling and string formatting — doable in either language
+
+**But:** If the DBA audience research shows strong resistance to non-Rust/C tooling, or if Bun's cross-platform story has gaps, switch to Rust.
+
+**Decision deadline:** Before Phase 0 begins. Allocate 1 week for research tasks.
+
+### 4.2 Async Runtime
+
+**If Rust:** Tokio
 - Industry standard for async Rust
 - `tokio-postgres` is the most mature async PG driver
 - Needed for: concurrent query cancellation, daemon mode, connector HTTP calls, streaming
 - Single-threaded runtime sufficient initially; multi-threaded for daemon mode
 
-### 4.3 Wire Protocol: tokio-postgres (with caveats)
+**If TypeScript/Bun:** Bun's built-in event loop
+- Bun has native async I/O, no need for external runtime
+- `postgres` (porsager) or `pg` for wire protocol
+- Built-in `fetch`, `WebSocket`, `bun:sqlite`
 
-Use `tokio-postgres` for the wire protocol layer, but **wrap it** — we need control over:
-- Raw protocol messages for `\copy` (COPY protocol)
-- CancelRequest sending
-- Notice and notification handling
+### 4.3 Wire Protocol
+
+**Requirements (language-agnostic):**
+- Full v3 wire protocol support
+- COPY sub-protocol (both directions)
+- CancelRequest (Ctrl-C)
+- Notice and notification handling (LISTEN/NOTIFY)
 - Connection parameter negotiation
+- Extended query protocol (for `\bind`, `\parse`, prepared statements)
 - Future: logical replication protocol
 
-Strategy: start with `tokio-postgres`, extract/fork the protocol layer when needed.
+**If Rust:** `tokio-postgres`, wrapped — start with it, extract/fork when we need more protocol control. Alternative: raw implementation using `bytes` + `tokio::net` (more work but full control).
 
-Alternative considered: raw implementation using `bytes` + `tokio::net`. Too much work initially, but may be the end state for full control.
+**If TypeScript/Bun:** `postgres` (porsager/postgres) — modern, fast, pure JS, supports COPY, LISTEN/NOTIFY, pipeline mode. Alternative: `pg` (node-postgres) — older but extremely battle-tested.
 
-### 4.4 REPL: rustyline
+### 4.4 REPL
 
+**If Rust:** `rustyline`
 - Most mature Rust readline implementation
 - History, completion, hints, key bindings
 - Custom `Completer`, `Highlighter`, `Hinter`, `Validator` traits
 - Limitation: not async-native (blocks on input). Workaround: run in dedicated thread, communicate via channels.
 
-### 4.5 TUI Pager: ratatui + crossterm
+**If TypeScript/Bun:** `readline` (built-in) or `@inquirer/prompts`
+- Node's built-in readline is basic but functional
+- `@inquirer/prompts` for richer input (but may not suit REPL pattern)
+- Custom readline with `process.stdin` raw mode for full control (Vi/Emacs, completion popup)
+- Alternative: port `rustyline` concepts in pure TS
 
+### 4.5 TUI Pager
+
+**If Rust:** `ratatui` + `crossterm`
 - `ratatui` is the standard Rust TUI framework
 - `crossterm` for cross-platform terminal manipulation
-- Pager is a separate mode: enters when output exceeds terminal, exits on `q`
-- Must coexist with readline (switch between REPL mode and pager mode)
+
+**If TypeScript/Bun:** `ink` (React for CLIs) or `blessed` / `terminal-kit`
+- `ink` is modern, component-based, great for complex UIs
+- `blessed` is more traditional ncurses-like
+- `terminal-kit` is lighter weight
+
+**Both:** Pager is a separate mode: enters when output exceeds terminal, exits on `q`. Must coexist with readline.
 
 ### 4.6 AI Integration: HTTP Client + Streaming
 
-- `reqwest` for HTTP calls to LLM APIs
-- Server-Sent Events (SSE) for streaming responses
-- Abstract `LlmProvider` trait:
-  ```rust
-  trait LlmProvider: Send + Sync {
-      async fn complete(&self, messages: &[Message], options: &CompletionOptions) -> Result<CompletionStream>;
-      fn name(&self) -> &str;
-      fn default_model(&self) -> &str;
-  }
-  ```
+- Abstract LLM provider interface (trait in Rust, interface in TypeScript):
+  - `complete(messages, options) → stream`
+  - `name() → string`
+  - `defaultModel() → string`
 - Implementations: OpenAI, Anthropic, Ollama
+- Server-Sent Events (SSE) for streaming responses
 - Schema serialization: compact DDL format (not full pg_dump) to minimize tokens
 - Context budget: allocate % of context window to schema, history, pg_ash data
+
+**If Rust:** `reqwest` for HTTP, custom SSE parser
+**If TypeScript/Bun:** `openai` and `@anthropic-ai/sdk` packages (official, streaming built-in), native `fetch`
 
 ### 4.7 Configuration
 
@@ -1552,7 +1755,9 @@ project-alpha/
 
 ### Package Managers
 - `brew install alpha` (Homebrew tap)
-- `cargo install alpha` (crates.io)
+- `cargo install alpha` (crates.io, if Rust)
+- `npm install -g alpha-cli` / `bun install -g alpha-cli` (if TypeScript/Bun)
+- `winget install alpha` / `choco install alpha` / `scoop install alpha` (Windows)
 - `.deb` and `.rpm` packages (Phase 4)
 - Docker: `ghcr.io/nikolays/alpha:latest`
 
@@ -1560,6 +1765,8 @@ project-alpha/
 ```bash
 curl -sL https://get.project-alpha.dev | sh
 ```
+
+See FR-28 for full install and auto-update specification.
 
 ---
 
