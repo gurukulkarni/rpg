@@ -1,0 +1,209 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
+
+  build:
+    name: Build (${{ matrix.artifact }})
+    needs: [checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (musl static -- use cross)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-aarch64
+          # macOS (native runners)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+            artifact: samo-darwin-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+            artifact: samo-darwin-aarch64
+          # Windows (MSVC)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-x86_64.exe
+          # Windows aarch64 cross-compiled from x64 via MSVC
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-aarch64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            release-${{ matrix.target }}-cargo-
+
+      - name: Install cross
+        if: matrix.use_cross
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          curl -fsSL "https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "${HOME}/.cargo/bin"
+
+      - name: Build release (cross)
+        if: matrix.use_cross
+        shell: bash
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build release (native)
+        if: "!matrix.use_cross"
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (unix)
+        if: "!contains(matrix.os, 'windows')"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          cp "target/${{ matrix.target }}/release/samo" "${{ matrix.artifact }}"
+          chmod +x "${{ matrix.artifact }}"
+
+      - name: Prepare artifact (windows)
+        if: contains(matrix.os, 'windows')
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          cp "target/${{ matrix.target }}/release/samo.exe" "${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  universal-binary:
+    name: macOS Universal Binary
+    needs: [build]
+    runs-on: macos-14
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: samo-darwin-x86_64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: samo-darwin-aarch64
+
+      - name: Create universal binary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          chmod +x samo-darwin-x86_64 samo-darwin-aarch64
+          lipo -create samo-darwin-x86_64 samo-darwin-aarch64 \
+            -output samo-darwin-universal
+          chmod +x samo-darwin-universal
+          file samo-darwin-universal
+          lipo -info samo-darwin-universal
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: samo-darwin-universal
+          path: samo-darwin-universal
+
+  release:
+    name: Create GitHub Release
+    needs: [build, universal-binary]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          mkdir -p release
+
+          # Move all binaries into release/
+          for dir in artifacts/*/; do
+            for file in "${dir}"*; do
+              cp "${file}" "release/"
+            done
+          done
+
+          # Generate SHA256SUMS (portable across Linux and macOS)
+          cd release
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -- * > SHA256SUMS
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 -- * > SHA256SUMS
+          else
+            echo "ERROR: no SHA256 tool found" >&2
+            exit 1
+          fi
+
+          echo "=== Release artifacts ==="
+          ls -la
+          echo ""
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Extract release notes
+        id: notes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          tag="${GITHUB_REF_NAME}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Releasing ${tag}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag }}
+          name: Samo ${{ steps.notes.outputs.tag }}
+          draft: false
+          prerelease: ${{ contains(steps.notes.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: |
+            release/*

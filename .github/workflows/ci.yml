@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
+
+  build:
+    name: Build (${{ matrix.artifact }})
+    needs: [checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (musl static -- use cross)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-aarch64
+          # macOS (native runners)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+            artifact: samo-darwin-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+            artifact: samo-darwin-aarch64
+          # Windows (MSVC)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-x86_64.exe
+          # Windows aarch64 cross-compiled from x64 via MSVC
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-aarch64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: build-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            build-${{ matrix.target }}-cargo-
+
+      - name: Install cross
+        if: matrix.use_cross
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          curl -fsSL "https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "${HOME}/.cargo/bin"
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        shell: bash
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (unix)
+        if: "!contains(matrix.os, 'windows')"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          cp "target/${{ matrix.target }}/release/samo" "${{ matrix.artifact }}"
+          chmod +x "${{ matrix.artifact }}"
+
+      - name: Prepare artifact (windows)
+        if: contains(matrix.os, 'windows')
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          cp "target/${{ matrix.target }}/release/samo.exe" "${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 7
