@@ -1146,8 +1146,28 @@ docker run -it ghcr.io/nikolays/samo
 #### NFR-4: Compatibility
 - Postgres 12-18 (and upcoming versions)
 - Forward-compatible: gracefully degrade on unknown PG versions
-- pgBouncer / PgCat / Supavisor connection pooler compatible
+- pgBouncer / PgCat / Supavisor connection pooler compatible:
+  - Detect pooler on connect (parse `server_version`, check `SHOW pool_mode` where available)
+  - Transaction mode: warn about features that break (prepared statements, temp tables, SET commands, LISTEN/NOTIFY, advisory locks)
+  - Session mode: full compatibility
+  - Statement mode: warn about multi-statement scripts
 - Works through SSH tunnels and port forwarding
+- Managed Postgres awareness:
+  - RDS: detect via `rds.extensions` GUC, adapt to available extensions
+  - Cloud SQL: detect via `cloudsql.*` GUCs
+  - Supabase: detect via connection string patterns
+  - Neon: detect via `neon.*` GUCs
+  - Degrade gracefully when pg_stat_statements not available (many managed providers don't enable by default)
+- pg_catalog version matrix: track views/columns that changed between PG 12-18 (e.g., `backend_type`, `pg_stat_progress_*`, `wait_event` changes)
+
+#### NFR-5: Threat Model
+- Prompt injection via schema names, column names, comments, and query results — LLM context includes user-controlled data
+- Credential handling: never store plaintext passwords, API keys only via env vars or 600-permission config files
+- `samo_ops` wrapper functions: all dynamic SQL uses `format()` with `%I`/`%L` specifiers only (no string concatenation)
+- Audit log integrity: append-only, Actor cannot modify or delete past entries
+- Network: enforce SSL for all connector API calls, validate certificates
+- pg_audit integration: recommend `pgaudit` extension for compliance environments to get independent audit trail
+- Supply chain: pin all dependency versions, audit licenses, use lockfile verification in CI
 
 ---
 
@@ -1348,6 +1368,12 @@ This is the most consequential architectural decision. Needs research and a fina
 - Server-Sent Events (SSE) for streaming responses
 - Schema serialization: compact DDL format (not full pg_dump) to minimize tokens
 - Context budget: allocate % of context window to schema, history, pg_ash data
+- Large schema strategy (1000+ tables):
+  - Tier 1 (always included): tables referenced in recent queries, tables mentioned in user prompt
+  - Tier 2 (included if space): tables in same schema, tables with FK relationships
+  - Tier 3 (on demand): remaining tables, summarized as counts per schema
+  - Schema metadata cache refreshed on `\d` commands, DDL execution, or manual `\refresh`
+- Prompt injection mitigation: schema names, column names, comments, and query results are marked as untrusted data in LLM context. System prompt explicitly instructs the model to treat them as data, not instructions.
 
 **If Rust:** `reqwest` for HTTP, custom SSE parser
 **If TypeScript/Bun:** `openai` and `@anthropic-ai/sdk` packages (official, streaming built-in), native `fetch`
