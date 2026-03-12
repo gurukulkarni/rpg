@@ -1,10 +1,10 @@
-# Project Alpha — Specification
+# Samo — Specification
 
 ## 1. Vision
 
 **A single Rust binary that replaces `psql` and becomes the primary interface between humans and Postgres — with an AI brain that can observe, analyze, act, and learn.**
 
-The world's most popular database deserves a terminal built for 2026, not 1996. Project Alpha is:
+The world's most popular database deserves a terminal built for 2026, not 1996. Samo is:
 
 - A **psql replacement** that respects 30 years of muscle memory
 - A **diagnostic powerhouse** with built-in DBA tooling
@@ -19,7 +19,7 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 
 ### Primary Goals
 
-1. **psql compatibility** — a user should be able to `alias psql=alpha` and not notice for 95% of their workflow
+1. **psql compatibility** — a user should be able to `alias psql=samo` and not notice for 95% of their workflow
 2. **Zero-dependency deployment** — single static binary, no runtime deps, runs everywhere psql runs
 3. **AI-first UX** — natural language queries, error explanation, EXPLAIN interpretation, schema-aware suggestions
 4. **Autonomous operations** — configurable autonomy levels from read-only monitoring to full autopilot
@@ -92,7 +92,7 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 **Connection string formats:**
 - URI: `postgresql://user:pass@host:port/db?sslmode=require&options=-csearch_path%3Dmyschema`
 - Key-value: `host=localhost port=5432 dbname=mydb sslmode=require options='-c search_path=myschema'`
-- Positional: `alpha dbname user host port`
+- Positional: `samo dbname user host port`
 
 **Service file support:**
 - `~/.pg_service.conf` and `PGSERVICEFILE`
@@ -213,7 +213,7 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 - `-t` — tuples only
 - `-P option=value` — set pset option
 - `-o file` — output to file
-- Stdin/stdout piping: `echo "SELECT 1" | alpha`
+- Stdin/stdout piping: `echo "SELECT 1" | samo`
 - ON_ERROR_STOP, ON_ERROR_ROLLBACK
 - AUTOCOMMIT
 - Exit code: 0 on success, 1 on error, 2 on connection failure
@@ -305,21 +305,21 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
 
 **How it works:**
 
-1. **Dedicated database role** — the tool connects as a purpose-built role (e.g., `alpha_agent`), not as a superuser, not as the application owner.
+1. **Dedicated database role** — the tool connects as a purpose-built role (e.g., `samo_agent`), not as a superuser, not as the application owner.
 
 2. **Fine-grained GRANTs** — the DBA grants exactly what the tool is allowed to do:
    ```sql
    -- L3: can ANALYZE, VACUUM, REINDEX CONCURRENTLY, cancel queries
-   GRANT pg_stat_scan_tables TO alpha_agent;
-   GRANT USAGE ON SCHEMA public TO alpha_agent;
-   GRANT SELECT ON ALL TABLES IN SCHEMA public TO alpha_agent;
+   GRANT pg_stat_scan_tables TO samo_agent;
+   GRANT USAGE ON SCHEMA public TO samo_agent;
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO samo_agent;
    -- But NOT: CREATE, DROP, ALTER, TRUNCATE, DELETE, INSERT, UPDATE
    ```
 
 3. **PL/pgSQL wrapper functions with SECURITY DEFINER** — for operations that need elevated privileges but should be constrained:
    ```sql
    -- Wrapper: allows REINDEX CONCURRENTLY on any index, but nothing else
-   CREATE OR REPLACE FUNCTION alpha_ops.reindex_concurrently(p_index regclass)
+   CREATE OR REPLACE FUNCTION samo_ops.reindex_concurrently(p_index regclass)
    RETURNS void
    LANGUAGE plpgsql
    SECURITY DEFINER  -- runs as the function owner (superuser/owner)
@@ -335,13 +335,13 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
        (SELECT relname FROM pg_class WHERE oid = p_index));
    END;
    $$;
-   GRANT EXECUTE ON FUNCTION alpha_ops.reindex_concurrently(regclass) TO alpha_agent;
+   GRANT EXECUTE ON FUNCTION samo_ops.reindex_concurrently(regclass) TO samo_agent;
    ```
 
 4. **dblink / postgres_fdw for non-transactional operations** — some operations (like `REINDEX CONCURRENTLY`, `CREATE INDEX CONCURRENTLY`, `VACUUM`) cannot run inside a transaction block. Wrapper functions use `dblink` or `postgres_fdw` to execute these in a separate connection:
    ```sql
    -- Wrapper using dblink for operations that can't run in a transaction
-   CREATE OR REPLACE FUNCTION alpha_ops.vacuum_table(p_table regclass)
+   CREATE OR REPLACE FUNCTION samo_ops.vacuum_table(p_table regclass)
    RETURNS void
    LANGUAGE plpgsql
    SECURITY DEFINER
@@ -364,26 +364,26 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
 
 5. **Dynamic wrapper generation** — during the setup/permission review phase, the tool can generate the appropriate wrapper functions based on the desired autonomy level:
    ```
-   alpha setup --level L3 --generate-wrappers
-   -- Outputs SQL to create the alpha_ops schema, role, wrapper functions, and GRANTs
+   samo setup --level L3 --generate-wrappers
+   -- Outputs SQL to create the samo_ops schema, role, wrapper functions, and GRANTs
    -- DBA reviews and applies
    
-   alpha setup --level L4 --generate-wrappers
+   samo setup --level L4 --generate-wrappers
    -- Generates additional wrappers for CREATE/DROP INDEX CONCURRENTLY, VACUUM FULL, etc.
    ```
 
 6. **Permission introspection** — the tool checks what it can actually do on connect:
    ```
-   alpha=> \permissions
-   Role: alpha_agent
+   samo=> \permissions
+   Role: samo_agent
    Database: production
    
    Effective permissions:
      ✓ SELECT on all tables (public, analytics)
-     ✓ ANALYZE (via alpha_ops.analyze_table)
-     ✓ VACUUM (via alpha_ops.vacuum_table)
-     ✓ REINDEX CONCURRENTLY (via alpha_ops.reindex_concurrently)
-     ✓ pg_cancel_backend (via alpha_ops.cancel_query)
+     ✓ ANALYZE (via samo_ops.analyze_table)
+     ✓ VACUUM (via samo_ops.vacuum_table)
+     ✓ REINDEX CONCURRENTLY (via samo_ops.reindex_concurrently)
+     ✓ pg_cancel_backend (via samo_ops.cancel_query)
      ✗ CREATE INDEX — not granted (would need L4 wrappers)
      ✗ DROP — not granted
      ✗ ALTER SYSTEM — not granted
@@ -395,15 +395,15 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
 
 7. **Autonomy level clamping** — if the app config says L4 but the database role only has L3 permissions, the tool operates at L3 and warns:
    ```
-   WARNING: Autonomy level L4 requested but database role 'alpha_agent' 
+   WARNING: Autonomy level L4 requested but database role 'samo_agent' 
    lacks permissions for L4 operations (CREATE INDEX, DROP INDEX, VACUUM FULL).
    Effective autonomy: L3
-   Run 'alpha setup --level L4 --generate-wrappers' to generate the required SQL.
+   Run 'samo setup --level L4 --generate-wrappers' to generate the required SQL.
    ```
 
 **Schema layout:**
 ```
-alpha_ops                    -- dedicated schema for wrapper functions
+samo_ops                    -- dedicated schema for wrapper functions
 ├── analyze_table(regclass)  -- SECURITY DEFINER, L3
 ├── vacuum_table(regclass)   -- SECURITY DEFINER + dblink, L3
 ├── reindex_concurrently(regclass)  -- SECURITY DEFINER + dblink, L3
@@ -498,7 +498,7 @@ alpha_ops                    -- dedicated schema for wrapper functions
 - `\echo`, `\qecho` still work for scripted output
 
 **Daemon mode:**
-- `alpha daemon --config config.toml`
+- `samo daemon --config config.toml`
 - Runs headless, no REPL, no stdin
 - Continuous monitoring loop
 - Reports via configured channels (Slack webhook, email, GitHub issues)
@@ -517,7 +517,7 @@ alpha_ops                    -- dedicated schema for wrapper functions
 **Debug flag:**
 - `--debug` / `-D` — enable debug mode
 - `\set DEBUG on|off` — toggle at runtime in interactive mode
-- `ALPHA_DEBUG=1` environment variable
+- `SAMO_DEBUG=1` environment variable
 - Default: off
 
 **What debug mode does:**
@@ -533,7 +533,7 @@ alpha_ops                    -- dedicated schema for wrapper functions
 **Log destinations:**
 - **stderr** — when `--debug` is used in interactive mode, debug output goes to stderr (doesn't pollute query results on stdout)
 - **Log file** — `--log-file path` or config `logging.file` — always append, never truncate
-- **Default log location:** `~/.local/share/alpha/debug.log` (when log file enabled)
+- **Default log location:** `~/.local/share/samo/debug.log` (when log file enabled)
 - **Structured format:** `[timestamp] [level] [component] message`
 
 **Log levels:**
@@ -547,20 +547,20 @@ alpha_ops                    -- dedicated schema for wrapper functions
 ```toml
 [logging]
 level = "info"                              # stderr threshold (interactive)
-file = "~/.local/share/alpha/debug.log"     # log file path (empty = disabled)
+file = "~/.local/share/samo/debug.log"     # log file path (empty = disabled)
 file_level = "debug"                        # log file threshold
-action_log = "~/.local/share/alpha/actions.log"  # agent action audit log (separate)
+action_log = "~/.local/share/samo/actions.log"  # agent action audit log (separate)
 max_file_size_mb = 100                      # rotate at this size
 max_files = 5                               # keep N rotated files
 ```
 
 **CLI flags:**
 ```bash
-alpha --debug                    # debug to stderr
-alpha --debug --log-file out.log # debug to stderr + file
-alpha --log-file out.log         # info to file, no debug on stderr
-alpha --log-level trace          # maximum verbosity
-alpha -D -E                      # debug mode + echo hidden queries (psql -E compat)
+samo --debug                    # debug to stderr
+samo --debug --log-file out.log # debug to stderr + file
+samo --log-file out.log         # info to file, no debug on stderr
+samo --log-level trace          # maximum verbosity
+samo -D -E                      # debug mode + echo hidden queries (psql -E compat)
 ```
 
 **Interaction with psql flags:**
@@ -586,7 +586,7 @@ Borrowed from Claude Code and OpenClaw. Long-running database work needs session
 - `\session resume [id]` — resume a previous session (reconnects, restores variables and history)
 - `\session save [name]` — save current session with a name
 - `\session delete [id]` — delete a session
-- Storage: SQLite database at `~/.local/share/alpha/sessions.db`
+- Storage: SQLite database at `~/.local/share/samo/sessions.db`
 
 **Context compaction (from Claude Code / OpenClaw):**
 - AI conversation context grows over a session — queries, results, explanations accumulate
@@ -632,7 +632,7 @@ Borrowed from pgcli. Save frequently used queries with short names.
 \n top_tables seq_scan 10
 ```
 
-- Stored in `~/.config/alpha/named_queries.toml` (portable, shareable)
+- Stored in `~/.config/samo/named_queries.toml` (portable, shareable)
 - Support positional parameters (`$1`, `$2`, ...)
 - Tab-completion for query names
 - Can be shared across team via version-controlled config
@@ -642,7 +642,7 @@ Borrowed from pgcli. Save frequently used queries with short names.
 Borrowed from pgcli. Warn before executing dangerous statements.
 
 ```
-alpha=> DROP TABLE users;
+samo=> DROP TABLE users;
 WARNING: This is a destructive operation.
 Are you sure you want to execute: DROP TABLE users? [y/N]
 ```
@@ -731,9 +731,9 @@ Enhanced autocomplete beyond basic schema objects. Borrowed from pgcli with addi
 
 Borrowed from Claude Code (CLAUDE.md/AGENTS.md) and OpenCode (/init).
 
-**`.alpha.toml`** — project-level configuration, checked into git:
+**`.samo.toml`** — project-level configuration, checked into git:
 ```toml
-# .alpha.toml — project-level config (lives in repo root)
+# .samo.toml — project-level config (lives in repo root)
 [connection]
 default_database = "myapp_development"
 default_host = "localhost"
@@ -767,7 +767,7 @@ This is a Rails 7 application using PostgreSQL 16.
 ```
 
 - AI reads these files on connect (if present in current directory or home)
-- `/init` command: AI analyzes the connected database and generates `.alpha.toml` and `POSTGRES.md`
+- `/init` command: AI analyzes the connected database and generates `.samo.toml` and `POSTGRES.md`
 
 #### FR-21: Multi-line Mode
 
@@ -793,10 +793,10 @@ Borrowed from pgcli. Built-in SSH tunnel for remote databases.
 
 ```bash
 # Connect through SSH tunnel
-alpha --ssh-tunnel user@bastion:22 -h db-host -p 5432 -d mydb
+samo --ssh-tunnel user@bastion:22 -h db-host -p 5432 -d mydb
 
 # Using config
-alpha -h mydb@production   # resolves from named connections with tunnel config
+samo -h mydb@production   # resolves from named connections with tunnel config
 ```
 
 **Configuration:**
@@ -837,7 +837,7 @@ SELECT * FROM users WHERE created_at >= date_trunc('week', current_date);
 -- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:L3
 -- action: REINDEX CONCURRENTLY idx_orders_created_at
 -- justification: Index bloat at 34%, threshold 25%
-SELECT alpha_ops.reindex_concurrently('idx_orders_created_at'::regclass);
+SELECT samo_ops.reindex_concurrently('idx_orders_created_at'::regclass);
 -- OK
 ```
 
@@ -871,7 +871,7 @@ severity_threshold = "warning"   # only send warning+ severity
 [alerts.email]
 smtp_host = "smtp.example.com"
 smtp_port = 587
-from = "alpha@example.com"
+from = "samo@example.com"
 to = ["dba@example.com"]
 severity_threshold = "critical"  # only critical alerts via email
 
@@ -921,10 +921,10 @@ statusline = "{host}:{port}/{db} | {mode} | {autonomy} | {tx_state} | {last_dura
 Borrowed from pgcli's F5 feature. When enabled, automatically prepends EXPLAIN to every query.
 
 ```
-alpha=> \set EXPLAIN on
+samo=> \set EXPLAIN on
 -- Explain mode ON. All queries will show execution plan.
 
-alpha=> SELECT * FROM users WHERE email = 'test@example.com';
+samo=> SELECT * FROM users WHERE email = 'test@example.com';
                           QUERY PLAN
 --------------------------------------------------------------
  Index Scan using idx_users_email on users  (cost=0.42..8.44 rows=1 width=128)
@@ -963,7 +963,7 @@ autonomy = "L1"      # read-only on staging
 host = "10.0.1.5"
 port = 5432
 database = "myapp"
-user = "alpha_agent"
+user = "samo_agent"
 sslmode = "verify-full"
 sslrootcert = "~/.ssl/rds-ca.pem"
 autonomy = "L3"
@@ -972,8 +972,8 @@ ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
 
 **Usage:**
 ```
-alpha @local          # connect using 'local' profile
-alpha @production     # connect using 'production' profile (with SSH tunnel)
+samo @local          # connect using 'local' profile
+samo @production     # connect using 'production' profile (with SSH tunnel)
 \c @staging           # switch to staging profile mid-session
 ```
 
@@ -989,27 +989,27 @@ Installation must be trivially easy on all platforms. Upgrading must be effortle
 
 ```bash
 # One-liner install (Linux, macOS)
-curl -sL https://get.project-alpha.dev | sh
+curl -sL https://get.samo.dev | sh
 
 # Homebrew (macOS, Linux)
-brew install alpha
+brew install samo
 
 # Windows — native installer
-winget install alpha
+winget install samo
 # or
-choco install alpha
+choco install samo
 # or
-scoop install alpha
+scoop install samo
 
 # npm/bun (if TypeScript)
-npm install -g alpha-cli
-bun install -g alpha-cli
+npm install -g samo-cli
+bun install -g samo-cli
 
 # Cargo (if Rust)
-cargo install alpha-cli
+cargo install samo-cli
 
 # Docker
-docker run -it ghcr.io/nikolays/alpha
+docker run -it ghcr.io/nikolays/samo
 
 # Direct binary download
 # GitHub Releases with platform-specific binaries
@@ -1018,17 +1018,17 @@ docker run -it ghcr.io/nikolays/alpha
 **Install script behavior:**
 - Detects OS and architecture automatically
 - Downloads correct binary from GitHub Releases
-- Installs to `~/.local/bin` (Linux), `/usr/local/bin` (macOS), or `%LOCALAPPDATA%\alpha` (Windows)
+- Installs to `~/.local/bin` (Linux), `/usr/local/bin` (macOS), or `%LOCALAPPDATA%\samo` (Windows)
 - Adds to PATH if needed (with user confirmation)
 - Verifies checksum (SHA256)
 - Shows version after install
-- Non-interactive mode for CI: `curl -sL https://get.project-alpha.dev | sh -s -- --yes`
+- Non-interactive mode for CI: `curl -sL https://get.samo.dev | sh -s -- --yes`
 
 **Auto-update:**
-- `alpha update` — check for and install latest version
-- `alpha update --check` — check only, don't install
+- `samo update` — check for and install latest version
+- `samo update --check` — check only, don't install
 - Background update check: on startup, check for new version (async, non-blocking, max 1 check per 24h)
-- Notification: `A new version is available (v0.3.0 → v0.4.0). Run 'alpha update' to upgrade.`
+- Notification: `A new version is available (v0.3.0 → v0.4.0). Run 'samo update' to upgrade.`
 - Auto-update mode (opt-in): automatically download and apply updates
   ```toml
   [update]
@@ -1038,15 +1038,15 @@ docker run -it ghcr.io/nikolays/alpha
   channel = "stable"         # stable | beta | nightly
   ```
 - Update channels: stable (default), beta (pre-release), nightly (CI builds)
-- Rollback: `alpha update --rollback` — revert to previous version (keeps one previous binary)
+- Rollback: `samo update --rollback` — revert to previous version (keeps one previous binary)
 - Update mechanism:
   - Self-replacing binary (download new binary, replace old, restart)
   - On Windows: download to temp, schedule replace on next launch (can't replace running binary)
   - Respects package manager: if installed via brew/cargo/npm, suggest using that manager instead
 
 **Version management:**
-- `alpha --version` — show version, build info, platform
-- `alpha version` — detailed: version, commit hash, build date, platform, linked libraries
+- `samo --version` — show version, build info, platform
+- `samo version` — detailed: version, commit hash, build date, platform, linked libraries
 - Version string embedded at compile time
 
 ### 3.2 Non-Functional Requirements
@@ -1289,9 +1289,9 @@ This is the most consequential architectural decision. Needs research and a fina
 
 **Hierarchy (lowest to highest priority):**
 1. Compiled defaults
-2. `/etc/alpha/config.toml` (system)
-3. `~/.config/alpha/config.toml` (user)
-4. `ALPHA_*` environment variables
+2. `/etc/samo/config.toml` (system)
+3. `~/.config/samo/config.toml` (user)
+4. `SAMO_*` environment variables
 5. Command-line flags
 6. `\set` commands (session only)
 
@@ -1336,14 +1336,14 @@ default_repo = ""
 
 [logging]
 level = "info"
-file = "~/.local/share/alpha/alpha.log"
-action_log = "~/.local/share/alpha/actions.log"
+file = "~/.local/share/samo/samo.log"
+action_log = "~/.local/share/samo/actions.log"
 ```
 
 ### 4.8 Project Structure
 
 ```
-project-alpha/
+samo/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── src/
@@ -1435,7 +1435,7 @@ project-alpha/
 
 ### Phase 0: psql Replacement (Weeks 1-8)
 
-**Goal:** A drop-in psql replacement. No AI, no agent, no extras — just a Rust binary that does everything psql does. If a user can't `alias psql=alpha` and keep working, this phase isn't done.
+**Goal:** A drop-in psql replacement. No AI, no agent, no extras — just a Rust binary that does everything psql does. If a user can't `alias psql=samo` and keep working, this phase isn't done.
 
 **Week 1-2: Connect and Query**
 - [ ] Project scaffold: Cargo.toml, CI (GitHub Actions)
@@ -1444,7 +1444,7 @@ project-alpha/
   - [ ] All connection parameters (host, hostaddr, port, dbname, user, password, sslmode, sslcert, sslkey, sslrootcert, application_name, options, connect_timeout, client_encoding, target_session_attrs, etc.)
   - [ ] URI format: `postgresql://user:pass@host:port/db?sslmode=require&options=...`
   - [ ] Key-value format: `host=... port=... dbname=...`
-  - [ ] Positional arguments: `alpha dbname user host port`
+  - [ ] Positional arguments: `samo dbname user host port`
 - [ ] All libpq environment variables:
   - [ ] PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGPASSFILE
   - [ ] PGOPTIONS, PGAPPNAME, PGSSLMODE, PGSSLCERT, PGSSLKEY, PGSSLROOTCERT
@@ -1572,7 +1572,7 @@ project-alpha/
 - [ ] `-0` / `--record-separator-zero` — zero byte record separator for unaligned
 - [ ] `--csv` — CSV output mode
 - [ ] `--json` — JSON output mode
-- [ ] Stdin/stdout piping: `echo "SELECT 1" | alpha`
+- [ ] Stdin/stdout piping: `echo "SELECT 1" | samo`
 - [ ] Exit codes: 0 success, 1 error, 2 connection failure, 3 script error (match psql)
 - [ ] `.psqlrc` execution on startup (skip with `-X`)
 - [ ] PSQLRC environment variable
@@ -1592,7 +1592,7 @@ project-alpha/
 - [ ] Transaction status in prompt
 - [ ] Conditional commands: `\if`, `\elif`, `\else`, `\endif` — scripting conditionals
 
-**Milestone:** Full psql replacement. Can `alias psql=alpha`. All common commands work. Builds and runs on all 6 platform targets. No AI, no extras — just psql in Rust.
+**Milestone:** Full psql replacement. Can `alias psql=samo`. All common commands work. Builds and runs on all 6 platform targets. No AI, no extras — just psql reimplemented.
 
 ### Phase 1: Beyond psql (Weeks 9-14)
 
@@ -1723,7 +1723,7 @@ project-alpha/
 - PG version matrix: 12, 13, 14, 15, 16, 17, 18
 
 ### Compatibility Tests
-- Run the same commands in psql and Project Alpha, diff the output
+- Run the same commands in psql and Samo, diff the output
 - Scripted test suite: `test-compat.sh` runs `-c` commands in both and compares
 - Target: < 5% divergence in output formatting for common commands
 
@@ -1744,26 +1744,26 @@ project-alpha/
 
 ### Binary Releases
 - GitHub Releases with pre-built binaries for all 6 targets:
-  - `alpha-linux-x86_64` (static, musl)
-  - `alpha-linux-aarch64` (static, musl)
-  - `alpha-darwin-x86_64`
-  - `alpha-darwin-aarch64`
-  - `alpha-windows-x86_64.exe`
-  - `alpha-windows-aarch64.exe`
+  - `samo-linux-x86_64` (static, musl)
+  - `samo-linux-aarch64` (static, musl)
+  - `samo-darwin-x86_64`
+  - `samo-darwin-aarch64`
+  - `samo-windows-x86_64.exe`
+  - `samo-windows-aarch64.exe`
 - Checksums (SHA256) and signatures
 - All targets built and tested in CI from Phase 0
 
 ### Package Managers
-- `brew install alpha` (Homebrew tap)
-- `cargo install alpha` (crates.io, if Rust)
-- `npm install -g alpha-cli` / `bun install -g alpha-cli` (if TypeScript/Bun)
-- `winget install alpha` / `choco install alpha` / `scoop install alpha` (Windows)
+- `brew install samo` (Homebrew tap)
+- `cargo install samo` (crates.io, if Rust)
+- `npm install -g samo-cli` / `bun install -g samo-cli` (if TypeScript/Bun)
+- `winget install samo` / `choco install samo` / `scoop install samo` (Windows)
 - `.deb` and `.rpm` packages (Phase 4)
-- Docker: `ghcr.io/nikolays/alpha:latest`
+- Docker: `ghcr.io/nikolays/samo:latest`
 
 ### Install Script
 ```bash
-curl -sL https://get.project-alpha.dev | sh
+curl -sL https://get.samo.dev | sh
 ```
 
 See FR-28 for full install and auto-update specification.
@@ -1783,9 +1783,9 @@ The terminal has two fundamental input modes, switchable with a single keystroke
 The classic psql experience. Input is treated as SQL or backslash commands.
 
 ```
-alpha=> SELECT * FROM users WHERE id = 42;
-alpha=> \dt public.*
-alpha=> \dba bloat
+samo=> SELECT * FROM users WHERE id = 42;
+samo=> \dt public.*
+samo=> \dba bloat
 ```
 
 - Default prompt: `dbname=>`
@@ -1800,7 +1800,7 @@ alpha=> \dba bloat
 Input is treated as natural language. The AI translates intent into SQL, shows it, and optionally executes.
 
 ```
-alpha text2sql> show me the 10 biggest tables
+samo text2sql> show me the 10 biggest tables
 -- Generating SQL...
 SELECT schemaname, tablename, 
        pg_total_relation_size(schemaname || '.' || tablename) AS total_size
@@ -1809,19 +1809,19 @@ ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC
 LIMIT 10;
 -- Run this query? [Y/n/edit]
 
-alpha text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
+samo text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
 -- Analyzing...
 -- The orders table has 12M rows but no index on created_at.
 -- Currently doing a sequential scan (cost: 847291).
 -- Recommendation: CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders(created_at);
 -- Create this index? [Y/n] (requires L3+ permissions)
 
-alpha text2sql> fix index bloat on the orders table
+samo text2sql> fix index bloat on the orders table
 -- Checking orders table indexes...
 -- idx_orders_created_at: 34% bloat (450MB → should be ~300MB)
 -- idx_orders_customer_id: 12% bloat (OK)
 -- Plan:
---   1. SELECT alpha_ops.reindex_concurrently('idx_orders_created_at'::regclass);
+--   1. SELECT samo_ops.reindex_concurrently('idx_orders_created_at'::regclass);
 -- Execute? [Y/n/edit]
 ```
 
@@ -1860,7 +1860,7 @@ Orthogonal to input mode — these control *how much the AI can do without askin
 The AI always shows what it wants to do and asks for confirmation before executing anything that changes state.
 
 ```
-alpha ai> add an index on users.email
+samo ai> add an index on users.email
 -- I'd like to run:
 --   CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
 -- This is a safe operation (CONCURRENTLY, no locks).
@@ -1877,7 +1877,7 @@ alpha ai> add an index on users.email
 The AI analyzes, plans, but does NOT execute. Produces a plan document.
 
 ```
-alpha plan> our API is timing out on the /orders endpoint, database seems slow
+samo plan> our API is timing out on the /orders endpoint, database seems slow
 
 -- Entering plan mode. I'll investigate and produce a plan.
 -- [1/5] Checking pg_stat_activity for long-running queries...
@@ -1902,7 +1902,7 @@ Actions (in order):
    recommend 50 based on active sessions)
 
 Execute this plan? [Y/n/edit/save]
--- Saved to: ~/.local/share/alpha/plans/2026-03-12-orders-perf.md
+-- Saved to: ~/.local/share/samo/plans/2026-03-12-orders-perf.md
 ```
 
 - AI can run read-only queries to gather information
@@ -1917,7 +1917,7 @@ Execute this plan? [Y/n/edit/save]
 The AI executes within its autonomy level without asking. For power users who trust the agent.
 
 ```
-alpha yolo> fix the bloat on the orders table
+samo yolo> fix the bloat on the orders table
 -- Running: ANALYZE orders; ✓
 -- Running: REINDEX CONCURRENTLY orders_pkey; ✓
 -- Running: REINDEX CONCURRENTLY idx_orders_created_at; ✓
@@ -1937,7 +1937,7 @@ alpha yolo> fix the bloat on the orders table
 Read-only. The AI watches and reports but never executes anything. For learning and auditing.
 
 ```
-alpha observe> watch the database for 5 minutes
+samo observe> watch the database for 5 minutes
 -- Observing...
 -- 13:04:12 | 247 active connections (pool: 85% utilized)
 -- 13:04:12 | Top wait event: LWLock:BufferContent (23% of samples)
@@ -2001,10 +2001,10 @@ mydb [L3] yolo>          -- text2sql + YOLO, autonomy L3
 ### 8.6 CLI Flags
 
 ```bash
-alpha --text2sql         # start in text2sql mode
-alpha --plan             # start in plan mode
-alpha --yolo --level L3  # YOLO with L3 autonomy
-alpha --observe 30m      # observe for 30 minutes, then exit
+samo --text2sql         # start in text2sql mode
+samo --plan             # start in plan mode
+samo --yolo --level L3  # YOLO with L3 autonomy
+samo --observe 30m      # observe for 30 minutes, then exit
 ```
 
 ### 8.7 Context Awareness Across Modes
@@ -2023,8 +2023,8 @@ When switching modes, context carries over. A plan generated in plan mode can be
 
 ## 9. Open Questions
 
-1. **Name:** "Project Alpha" is the codename. Final shipping name TBD.
-2. **License:** Source-available? Dual license (AGPL + commercial)? Apache 2.0? Decision impacts adoption and business model.
+1. **Name:** Samo (CLI component of the [Samo](https://samo.sh) platform).
+2. **License:** Apache 2.0.
 3. **Wire protocol:** Fork `tokio-postgres` or build from scratch? Start with tokio-postgres, evaluate after Phase 0.
 4. **pgBouncer transaction mode:** How to handle features that require session-level state (prepared statements, temp tables) through poolers?
 5. **Offline AI:** Should we bundle a small local model (e.g., quantized Phi-3) for environments without internet? Or is Ollama sufficient?

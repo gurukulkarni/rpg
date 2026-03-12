@@ -1,4 +1,4 @@
-# Project Alpha
+# Samo
 
 > `psql` reimagined: a Postgres terminal with an AI brain.
 
@@ -35,7 +35,7 @@ Meanwhile, AI coding tools (Cursor, Warp, Claude Code) have proven that putting 
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  project-alpha                       │
+│                  samo                       │
 │                                                     │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────┐  │
 │  │  L1: Core   │  │  L2: UX      │  │ L3: AI    │  │
@@ -140,12 +140,12 @@ An LLM lives inside the terminal.
 /ask show me the top 10 queries by total time from pg_ash
 
 -- Inline explanation
-alpha=> SELECT * FROM orders WHERE status = 'pending';
+samo=> SELECT * FROM orders WHERE status = 'pending';
 ERROR: column "status" does not exist
 -- 💡 Did you mean "order_status"? (orders.order_status text NOT NULL)
 
 -- EXPLAIN analysis
-alpha=> /explain SELECT * FROM orders JOIN customers ON ...
+samo=> /explain SELECT * FROM orders JOIN customers ON ...
 -- Returns annotated plan with bottleneck identification
 ```
 
@@ -198,10 +198,10 @@ The differentiator — not just a terminal, but an agent control surface.
 
 ```bash
 # Interactive
-alpha --host prod-db-01 --level L3
+samo --host prod-db-01 --level L3
 
 # Daemon mode
-alpha daemon --config /etc/alpha/config.toml --level L2
+samo daemon --config /etc/samo/config.toml --level L2
 ```
 
 ---
@@ -283,7 +283,7 @@ alpha daemon --config /etc/alpha/config.toml --level L2
 
 ## License
 
-TBD
+Apache 2.0
 
 ---
 
