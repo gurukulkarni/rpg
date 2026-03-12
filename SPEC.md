@@ -294,7 +294,7 @@ Each area is independently configurable:
 | **bloat** | Table bloat (pg_repack, VACUUM FULL, CLUSTER), index bloat (REINDEX CONCURRENTLY) | "orders 40% table bloat; idx_orders_created_at 34% index bloat" | Shows pg_repack / REINDEX CONCURRENTLY, waits | Auto-runs during maintenance window |
 | **index_health** | Unused indexes, duplicate indexes, missing indexes, invalid indexes | "idx_legacy unused 90 days; seq scan on orders.customer_id" | Shows CREATE/DROP INDEX CONCURRENTLY, waits | Auto-creates/drops indexes |
 | **config_tuning** | PostgreSQL parameter optimization, pg_reload_conf | "shared_buffers is 128MB, recommend 4GB" | Shows ALTER SYSTEM SET, waits | Auto-tunes safe parameters |
-| **query_management** | Long-running query cancel, idle-in-transaction termination | "PID 12345 running 45min; PID 6789 idle-in-tx 2h" | Shows pg_cancel/terminate_backend, waits | Auto-cancels/terminates based on thresholds |
+| **query_optimization** | Long-running query cancel, idle-in-transaction termination | "PID 12345 running 45min; PID 6789 idle-in-tx 2h" | Shows pg_cancel/terminate_backend, waits | Auto-cancels/terminates based on thresholds |
 | **connection_management** | Pool saturation, idle connection cleanup | "Pool at 95%, 20 idle connections" | Shows plan, waits | Auto-manages connections |
 | **replication** | Replication lag, slot management, failover | "Slot 'sub1' lag at 5GB" | Shows command, waits | Auto-manages slots |
 | **minor_upgrade** | Minor PG version upgrades (16.2 → 16.4) | "PG 16.4 available, 3 security fixes" | Produces upgrade plan, waits | Auto-schedules upgrade |
@@ -312,7 +312,7 @@ vacuum = "advisor"
 bloat = "advisor"
 index_health = "advisor"
 config_tuning = "advisor"
-query_management = "advisor"
+query_optimization = "advisor"
 connection_management = "advisor"
 replication = "advisor"
 rca = "advisor"
@@ -328,7 +328,7 @@ security = "advisor"             # max level: guardian
 samo --autonomy all:advisor          # everything in advisor mode (default, safest)
 samo --autonomy all:guardian         # everything needs approval
 samo --autonomy all:pilot            # full autopilot (use with caution)
-samo --autonomy vacuum:pilot,bloat:pilot,query_management:guardian  # granular
+samo --autonomy vacuum:pilot,bloat:pilot,query_optimization:guardian  # granular
 ```
 
 **CLI and runtime:**
@@ -463,7 +463,7 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
    index_health       | pilot    | ✓ reindex_concur.  | pilot
    vacuum             | pilot    | ✓ vacuum_table     | pilot
    config_tuning      | guardian | ✓ alter_system_set | guardian
-   query_management       | pilot    | ✓ cancel_query     | pilot
+   query_optimization       | pilot    | ✓ cancel_query     | pilot
    index_creation     | guardian | ✗ not granted      | advisor ⚠
    index_removal      | guardian | ✗ not granted      | advisor ⚠
    major_upgrade      | advisor  | N/A                | advisor
@@ -1023,7 +1023,7 @@ database = "myapp"
 user = "samo_agent"
 sslmode = "verify-full"
 sslrootcert = "~/.ssl/rds-ca.pem"
-autonomy = "vacuum:pilot,index_health:pilot,query_management:guardian"
+autonomy = "vacuum:pilot,index_health:pilot,query_optimization:guardian"
 ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
 ```
 
@@ -1887,7 +1887,7 @@ concurrent session evidence.
 - [ ] Launchd plist for macOS
 - [ ] Windows service support
 - [ ] Container image (Alpine-based, ~15MB)
-- [ ] Advisor mode for remaining features: vacuum, bloat, config_tuning, query_management, etc.
+- [ ] Advisor mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
 
 **Milestone:** Index health and RCA work end-to-end at all three autonomy levels. Other features work at Advisor level. Agent runs as a daemon on all platforms.
 
