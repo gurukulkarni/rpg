@@ -1,10 +1,10 @@
-# Project Alpha — Samo CLI
+# Project Alpha
 
 > `psql` reimagined: a Postgres terminal with an AI brain.
 
 **Status:** Vision / pre-development  
 **Language:** Rust  
-**Org:** [PostgresAI](https://postgres.ai) · Part of the [Samo](https://samo.sh) ecosystem
+**Org:** [PostgresAI](https://postgres.ai)
 
 ---
 
@@ -15,7 +15,7 @@ A ground-up Rust replacement for `psql` that fuses four things that have never b
 1. **A psql-compatible Postgres terminal** — full wire protocol, backslash commands, muscle memory intact
 2. **Batteries included** — pgcli-style autocomplete, pspg-style pager, postgres_dba diagnostics built in
 3. **An AI-powered terminal** — LLM inside, understands your schema, explains errors, writes and optimizes SQL
-4. **A Samo agent control surface** — autonomous database health management with granular autonomy levels
+4. **An autonomous agent control surface** — database health management with granular autonomy levels
 
 Think: `psql` at the core, `pgcli` for UX, `warp` for AI, `openclaw` for connectivity.
 
@@ -35,7 +35,7 @@ Meanwhile, AI coding tools (Cursor, Warp, Claude Code) have proven that putting 
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    samo-cli                          │
+│                  project-alpha                       │
 │                                                     │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────┐  │
 │  │  L1: Core   │  │  L2: UX      │  │ L3: AI    │  │
@@ -51,7 +51,7 @@ Meanwhile, AI coding tools (Cursor, Warp, Claude Code) have proven that putting 
 │  │           L4: Agent / Connector              │   │
 │  │                                              │   │
 │  │  Autonomy engine (L1-L5)                     │   │
-│  │  PostgresAI health protocols                 │   │
+│  │  Health protocols                            │   │
 │  │  pg_ash wait event analysis                  │   │
 │  │  Connectors: Datadog │ pganalyze │ RDS       │   │
 │  │              Supabase │ Jira │ GitHub         │   │
@@ -107,7 +107,7 @@ Everything `pgcli` and `pspg` do, built in.
 - Can still pipe to external pager if preferred
 
 ### Built-in Diagnostics (postgres_dba)
-Nik's [postgres_dba](https://github.com/NikolayS/postgres_dba) queries available as first-class commands:
+[postgres_dba](https://github.com/NikolayS/postgres_dba) queries available as first-class commands:
 
 ```
 \dba activity     — current activity (pg_stat_activity)
@@ -140,17 +140,17 @@ An LLM lives inside the terminal.
 /ask show me the top 10 queries by total time from pg_ash
 
 -- Inline explanation
-samo=> SELECT * FROM orders WHERE status = 'pending';
+alpha=> SELECT * FROM orders WHERE status = 'pending';
 ERROR: column "status" does not exist
 -- 💡 Did you mean "order_status"? (orders.order_status text NOT NULL)
 
 -- EXPLAIN analysis
-samo=> /explain SELECT * FROM orders JOIN customers ON ...
+alpha=> /explain SELECT * FROM orders JOIN customers ON ...
 -- Returns annotated plan with bottleneck identification
 ```
 
 ### LLM Backend
-- Pluggable: OpenAI, Anthropic, local models (ollama), PostgresAI's own models
+- Pluggable: OpenAI, Anthropic, local models (ollama)
 - Context window management — schema + recent queries + pg_ash data as context
 - Streaming responses in terminal
 
@@ -158,7 +158,7 @@ samo=> /explain SELECT * FROM orders JOIN customers ON ...
 
 ## Layer 4: Autonomous Agent
 
-This is what makes it **Samo**, not just another psql.
+The differentiator — not just a terminal, but an agent control surface.
 
 ### Autonomy Levels
 
@@ -174,7 +174,7 @@ This is what makes it **Samo**, not just another psql.
 - **Continuous health monitoring** — connect, collect metrics, detect anomalies
 - **Root cause analysis** — correlate pg_ash wait events, logs, metrics, locks
 - **Auto-remediation** — reindex, vacuum, tune parameters (within autonomy level)
-- **Protocol execution** — follow PostgresAI's health improvement playbooks
+- **Protocol execution** — follow health improvement playbooks
 - **Issue tracking** — create/update issues in Jira, GitHub, GitLab with RCA and actions taken
 - **Escalation** — when something exceeds autonomy level, create a detailed ticket or alert
 
@@ -187,7 +187,6 @@ This is what makes it **Samo**, not just another psql.
 | **pganalyze** | Query statistics, EXPLAIN plans, index advisor suggestions |
 | **AWS RDS** | Performance Insights, Enhanced Monitoring, CloudWatch |
 | **Supabase** | Project management API, Postgres via pooler |
-| **PostgresAI** | Health check protocols, diagnostic playbooks |
 
 ### Modes
 
@@ -197,10 +196,10 @@ This is what makes it **Samo**, not just another psql.
 
 ```bash
 # Interactive
-samo --host prod-db-01 --level L3
+alpha --host prod-db-01 --level L3
 
 # Daemon mode
-samo daemon --config /etc/samo/config.toml --level L2
+alpha daemon --config /etc/alpha/config.toml --level L2
 ```
 
 ---
@@ -233,8 +232,8 @@ samo daemon --config /etc/samo/config.toml --level L2
 
 ### Phase 3: Agent (Month 4-7)
 - [ ] Autonomy level framework
-- [ ] PostgresAI health check protocol engine
-- [ ] First connectors (pg_ash, PostgresAI)
+- [ ] Health check protocol engine
+- [ ] First connectors (pg_ash native)
 - [ ] Daemon mode
 - [ ] Issue tracker integration (GitHub)
 - [ ] Alert/notification channels
@@ -275,24 +274,12 @@ samo daemon --config /etc/samo/config.toml --level L2
 | `postgres_dba` | Diagnostic queries | Built-in, not separate SQL files |
 | `warp` | AI in terminal | Postgres-specific, not generic |
 | `claude-code` | AI coding agent | Database-specific domain expertise |
-| `openclaw` | Agent connectivity | Postgres-native protocols |
-
----
-
-## Name
-
-**Project Alpha** is the codename. The shipping name will likely be `samo` (the CLI component of the [Samo](https://samo.sh) platform).
-
-```
-samo — noun. Self. (from Proto-Slavic *samъ)
-      Also: Self-driving Postgres.
-```
 
 ---
 
 ## License
 
-TBD (likely source-available with commercial licensing for enterprise features)
+TBD
 
 ---
 
