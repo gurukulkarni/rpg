@@ -183,9 +183,11 @@ The differentiator — not just a terminal, but an agent control surface.
 | Source | What We Get |
 |--------|-------------|
 | **pg_ash** | Wait events, query-level performance, active session history |
+| **PostgresAI Monitoring & Checkup** | Historical metrics, health scores, checkup reports, baselines |
+| **PostgresAI Issues** | Issue tracking, RCA linkage, remediation status, evidence |
 | **Datadog** | Infrastructure metrics, custom monitors, dashboards |
 | **pganalyze** | Query statistics, EXPLAIN plans, index advisor suggestions |
-| **AWS RDS** | Performance Insights, Enhanced Monitoring, CloudWatch |
+| **AWS CloudWatch** | CloudWatch metrics/logs/alarms, RDS Performance Insights, Enhanced Monitoring |
 | **Supabase** | Project management API, Postgres via pooler |
 
 ### Modes

@@ -245,18 +245,37 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 - Index advisor suggestions
 - Auth: PGANALYZE_API_KEY
 
-**AWS RDS:**
-- Performance Insights API
-- Enhanced Monitoring
-- CloudWatch metrics
-- Auth: AWS credentials (standard chain)
+**AWS CloudWatch:**
+- CloudWatch metrics (CPU, memory, IOPS, network, disk)
+- CloudWatch Logs (Postgres logs via log_destination)
+- CloudWatch Alarms (status, history)
+- RDS Performance Insights API (wait events, top SQL, load)
+- RDS Enhanced Monitoring (OS-level metrics)
+- RDS Events (maintenance, failover, configuration changes)
+- Auth: AWS credentials (standard chain — env vars, ~/.aws/credentials, IAM role)
 
 **Supabase:**
 - Management API (project info, settings)
 - Connect via pooler
 - Auth: SUPABASE_ACCESS_TOKEN
 
-**Issue Trackers:**
+**PostgresAI Monitoring & Checkup:**
+- Pull monitoring data from PostgresAI platform
+- Historical metrics, query performance, health scores
+- Checkup reports: automated health assessments with recommendations
+- Compare current state against PostgresAI baselines and best practices
+- Auth: POSTGRESAI_API_KEY + project/org identifiers
+
+**PostgresAI Issues:**
+- Read/create/update issues in PostgresAI's issue tracking system
+- Link RCA findings to existing issues
+- Auto-create issues from agent-detected problems
+- Track remediation status (open → in progress → resolved → verified)
+- Attach evidence: query plans, wait event snapshots, metric graphs
+- Bidirectional sync with external trackers (GitHub, Jira) when configured
+- Auth: same POSTGRESAI_API_KEY
+
+**Issue Trackers (external):**
 - GitHub Issues: create/update issues with RCA
 - GitLab Issues: same
 - Jira: create/update tickets
