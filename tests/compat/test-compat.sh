@@ -264,9 +264,8 @@ compare "\\db" \
 compare "\\dT" \
   "\\dT"
 
-## \dD — wrong columns: missing Collation/Check, has Description (#170)
-# compare "\\dD" \
-#   "\\dD"
+compare "\\dD" \
+  "\\dD"
 
 ## \dp — column/format mismatch (#173)
 # compare "\\dp" \
@@ -282,21 +281,19 @@ compare "\\dd" \
 compare "\\dc" \
   "\\dc"
 
-## \dy — empty result shows nothing (#175)
-# compare "\\dy" \
-#   "\\dy"
+compare "\\dy" \
+  "\\dy"
 
-## \do — empty result shows nothing (#175)
+## \do — basic \do shows Description column, samo doesn't
 # compare "\\do" \
 #   "\\do"
 
-## \df+ — missing verbose columns (#176)
+## \df+ — Internal name shows function body instead of empty
 # compare "\\df+" \
 #   "\\df+"
 
-## \dT+ — missing verbose columns (#177)
-# compare "\\dT+" \
-#   "\\dT+"
+compare "\\dT+" \
+  "\\dT+"
 
 ## \dx+ — missing verbose columns (#178)
 # compare "\\dx+" \
