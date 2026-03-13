@@ -31,6 +31,58 @@ const DEFAULT_HISTORY_FILE: &str = ".samo_history";
 const HISTORY_SIZE: usize = 2000;
 
 // ---------------------------------------------------------------------------
+// AI key resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve an API key from the `api_key_env` config value.
+///
+/// If the value looks like a raw API key (starts with `sk-`, `sk-ant-`, etc.)
+/// rather than an environment variable name, use it directly but warn the user.
+/// Otherwise, treat it as an env-var name and look it up.
+/// Track whether we've already warned about raw API keys in this session.
+static RAW_KEY_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
+    let env_or_key = api_key_env?;
+
+    // Detect raw keys accidentally placed in api_key_env.
+    let looks_like_raw_key = env_or_key.starts_with("sk-")
+        || env_or_key.starts_with("gsk_")
+        || (env_or_key.len() > 40
+            && !env_or_key
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_'));
+
+    if looks_like_raw_key {
+        // Warn only once per session to avoid noise on repeated AI commands.
+        if !RAW_KEY_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "WARNING: api_key_env appears to contain a raw API key. \
+                 For security, set it to an environment variable name instead:"
+            );
+            eprintln!(
+                "  api_key_env = \"OPENAI_API_KEY\"  # then: export OPENAI_API_KEY=\"sk-...\""
+            );
+        }
+        // Use it anyway so things work.
+        return Some(env_or_key.to_owned());
+    }
+
+    match std::env::var(env_or_key) {
+        Ok(val) if !val.is_empty() => Some(val),
+        _ => {
+            eprintln!(
+                "ERROR: environment variable '{}' is not set. \
+                 Set it with: export {}=\"your-api-key\"",
+                env_or_key, env_or_key
+            );
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Transaction state
 // ---------------------------------------------------------------------------
 
@@ -3161,12 +3213,7 @@ async fn observe_loop(
         return;
     }
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -4780,12 +4827,7 @@ async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &mut
         _ => return, // AI not configured — silently skip.
     };
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let Ok(provider) = crate::ai::create_provider(
         provider_name,
@@ -4846,12 +4888,7 @@ async fn interpret_auto_explain(
         _ => return,
     };
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let Ok(provider) = crate::ai::create_provider(
         provider_name,
@@ -5194,13 +5231,8 @@ async fn handle_ai_ask(
         return;
     }
 
-    // Resolve the API key from the configured environment variable.
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    // Resolve the API key (handles raw keys, missing env vars, etc.).
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -5425,12 +5457,7 @@ async fn handle_ai_plan(
         return;
     }
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -5567,13 +5594,8 @@ async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &Co
         return;
     }
 
-    // Resolve the API key from the configured environment variable.
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    // Resolve the API key (handles raw keys, missing env vars, etc.).
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -5737,12 +5759,7 @@ async fn handle_ai_explain(
         return;
     }
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -5972,12 +5989,7 @@ async fn handle_ai_optimize(
         return;
     }
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -6066,12 +6078,7 @@ async fn handle_ai_describe(
         return;
     }
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -6250,12 +6257,7 @@ async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &Co
     let total_steps = snapshot.steps.len();
     eprintln!("Collected {data_steps}/{total_steps} steps with data. Analyzing...\n");
 
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
 
     let provider = match crate::ai::create_provider(
         provider_name,
@@ -7641,5 +7643,53 @@ mod tests {
             parse_duration("  10s  "),
             Some(std::time::Duration::from_secs(10))
         );
+    }
+
+    // -- resolve_api_key -------------------------------------------------------
+
+    #[test]
+    fn resolve_api_key_none() {
+        assert!(resolve_api_key(None).is_none());
+    }
+
+    #[test]
+    fn resolve_api_key_raw_openai() {
+        // Reset the warn flag for this test.
+        RAW_KEY_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let result = resolve_api_key(Some("sk-proj-abc123xyz456def789"));
+        assert_eq!(result, Some("sk-proj-abc123xyz456def789".to_owned()));
+    }
+
+    #[test]
+    fn resolve_api_key_raw_anthropic() {
+        RAW_KEY_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let result = resolve_api_key(Some("sk-ant-api03-abcdefghijklmnop"));
+        assert_eq!(
+            result,
+            Some("sk-ant-api03-abcdefghijklmnop".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_env_var() {
+        std::env::set_var("SAMO_TEST_API_KEY_12345", "test-secret-value");
+        let result = resolve_api_key(Some("SAMO_TEST_API_KEY_12345"));
+        assert_eq!(result, Some("test-secret-value".to_owned()));
+        std::env::remove_var("SAMO_TEST_API_KEY_12345");
+    }
+
+    #[test]
+    fn resolve_api_key_missing_env_var() {
+        std::env::remove_var("NONEXISTENT_SAMO_VAR_99999");
+        let result = resolve_api_key(Some("NONEXISTENT_SAMO_VAR_99999"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_api_key_empty_env_var() {
+        std::env::set_var("SAMO_EMPTY_KEY_TEST", "");
+        let result = resolve_api_key(Some("SAMO_EMPTY_KEY_TEST"));
+        assert!(result.is_none());
+        std::env::remove_var("SAMO_EMPTY_KEY_TEST");
     }
 }
