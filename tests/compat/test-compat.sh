@@ -312,6 +312,22 @@ compare_flags "unaligned csv from table" \
   --csv -c "select id, name from users order by id limit 3"
 
 # ---------------------------------------------------------------------------
+# Expanded display mode
+# ---------------------------------------------------------------------------
+
+## -x produces empty output with -c (#214)
+# compare_flags "expanded single row" \
+#   -x -c "select 1 as num, 'hello' as greeting"
+
+## -x produces empty output with -c (#214)
+# compare_flags "expanded multi-row" \
+#   -x -c "select id, name from users order by id limit 3"
+
+## -x produces empty output with -c (#214)
+# compare_flags "expanded with null" \
+#   -x -c "select null::text as val, 42 as num"
+
+# ---------------------------------------------------------------------------
 # Show source commands
 # ---------------------------------------------------------------------------
 
@@ -345,6 +361,13 @@ compare "\\det" \
 
 compare "\\deu" \
   "\\deu"
+
+# ---------------------------------------------------------------------------
+# File include (\i)
+# ---------------------------------------------------------------------------
+
+compare_flags "\\i file include" \
+  -c "\\i tests/fixtures/include_test.sql"
 
 # ---------------------------------------------------------------------------
 # Info commands
