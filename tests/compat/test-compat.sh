@@ -312,6 +312,41 @@ compare_flags "unaligned csv from table" \
   --csv -c "select id, name from users order by id limit 3"
 
 # ---------------------------------------------------------------------------
+# Show source commands
+# ---------------------------------------------------------------------------
+
+compare "\\sf user_order_count" \
+  "\\sf user_order_count"
+
+## \sf+ — line numbering format mismatch (#208)
+# compare "\\sf+ user_order_count" \
+#   "\\sf+ user_order_count"
+
+## \sv — missing CREATE OR REPLACE VIEW header + trailing semicolon (#209)
+# compare "\\sv active_products" \
+#   "\\sv active_products"
+
+## \sv+ — same issue as \sv (#209)
+# compare "\\sv+ active_products" \
+#   "\\sv+ active_products"
+
+# ---------------------------------------------------------------------------
+# Foreign data wrapper commands
+# ---------------------------------------------------------------------------
+
+compare "\\des" \
+  "\\des"
+
+compare "\\dew" \
+  "\\dew"
+
+compare "\\det" \
+  "\\det"
+
+compare "\\deu" \
+  "\\deu"
+
+# ---------------------------------------------------------------------------
 # Info commands
 # ---------------------------------------------------------------------------
 
