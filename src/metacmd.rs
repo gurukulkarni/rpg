@@ -261,6 +261,24 @@ pub enum MetaCmd {
     /// `\nd name` — delete a named query.
     NamedDelete(String),
 
+    // -- Input mode --------------------------------------------------------
+    /// `\sql` — switch to SQL input mode.
+    SqlMode,
+    /// `\text2sql` / `\t2s` — switch to text-to-SQL input mode.
+    Text2SqlMode,
+    /// `\mode` — show current mode summary.
+    ShowMode,
+
+    // -- Execution mode ----------------------------------------------------
+    /// `\plan` — enter plan mode.
+    PlanMode,
+    /// `\yolo` — enter YOLO mode.
+    YoloMode,
+    /// `\observe` — enter observe mode (optional duration argument).
+    ObserveMode,
+    /// `\interactive` — return to interactive mode.
+    InteractiveMode,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -420,6 +438,8 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
         Some('n') => parse_n_family(input),
+        Some('m') => parse_m_family(input),
+        Some('y') => parse_y_family(input),
         Some('!') => parse_shell(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
@@ -444,6 +464,12 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
 
 /// Dispatch `s`-family commands: `\set`, `\sf`, `\sv`.
 fn parse_s_family(input: &str) -> ParsedMeta {
+    // \sql — switch to SQL mode
+    if let Some(rest) = input.strip_prefix("sql") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::SqlMode);
+        }
+    }
     if let Some(after) = input.strip_prefix("set") {
         if after.is_empty() || after.starts_with(char::is_whitespace) {
             return parse_set(input);
@@ -501,6 +527,17 @@ fn parse_pset(input: &str) -> ParsedMeta {
 /// This function is called only when the `t` arm is reached; it must
 /// distinguish `\t` from `\timing` by checking for the full word.
 fn parse_t_family(input: &str) -> ParsedMeta {
+    // `\text2sql` / `\t2s` — switch to text-to-SQL mode
+    if let Some(rest) = input.strip_prefix("text2sql") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Text2SqlMode);
+        }
+    }
+    if let Some(rest) = input.strip_prefix("t2s") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Text2SqlMode);
+        }
+    }
     // `\timing …` takes priority over `\t`
     if let Some(rest) = input.strip_prefix("timing") {
         let arg = rest.trim();
@@ -521,6 +558,26 @@ fn parse_t_family(input: &str) -> ParsedMeta {
                 _ => None,
             };
             return ParsedMeta::simple(MetaCmd::TuplesOnly(mode));
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\mode` — show current input mode.
+fn parse_m_family(input: &str) -> ParsedMeta {
+    if let Some(rest) = input.strip_prefix("mode") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ShowMode);
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\yolo` — enter YOLO execution mode.
+fn parse_y_family(input: &str) -> ParsedMeta {
+    if let Some(rest) = input.strip_prefix("yolo") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::YoloMode);
         }
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -815,6 +872,12 @@ fn parse_e_family(input: &str) -> ParsedMeta {
 
 /// Parse `\if expr`, `\i file`, and `\ir file`.
 fn parse_i_family(input: &str) -> ParsedMeta {
+    // `\interactive` — return to interactive execution mode.
+    if let Some(rest) = input.strip_prefix("interactive") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::InteractiveMode);
+        }
+    }
     // `\if <expression>` — expression captured in `pattern`.
     if let Some(rest) = input.strip_prefix("if") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -869,8 +932,14 @@ fn parse_i_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\o [file]`.
+/// Parse `\o [file]` and `\observe`.
 fn parse_o(input: &str) -> ParsedMeta {
+    // `\observe` — enter observe execution mode.
+    if let Some(rest) = input.strip_prefix("observe") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ObserveMode);
+        }
+    }
     let Some(rest) = input.strip_prefix('o') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
@@ -995,6 +1064,12 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
             }
             return ParsedMeta::simple(MetaCmd::Parse(name));
+        }
+    }
+    // `\plan` — enter plan execution mode.
+    if let Some(rest) = input.strip_prefix("plan") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::PlanMode);
         }
     }
     parse_simple_or_unknown(input, "p", MetaCmd::PrintBuffer)
@@ -2714,5 +2789,67 @@ mod tests {
     fn parse_named_delete_missing_name_is_unknown() {
         let m = parse("\\nd");
         assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    // -- Input mode commands ---------------------------------------------------
+
+    #[test]
+    fn parse_sql_mode() {
+        assert_eq!(parse("\\sql").cmd, MetaCmd::SqlMode);
+    }
+
+    #[test]
+    fn parse_text2sql_mode() {
+        assert_eq!(parse("\\text2sql").cmd, MetaCmd::Text2SqlMode);
+    }
+
+    #[test]
+    fn parse_t2s_alias() {
+        assert_eq!(parse("\\t2s").cmd, MetaCmd::Text2SqlMode);
+    }
+
+    #[test]
+    fn parse_show_mode() {
+        assert_eq!(parse("\\mode").cmd, MetaCmd::ShowMode);
+    }
+
+    #[test]
+    fn parse_mode_prefix_unknown() {
+        // \modex should be unknown, not \mode
+        assert!(matches!(parse("\\modex").cmd, MetaCmd::Unknown(_)));
+    }
+
+    // -- Execution mode commands -----------------------------------------------
+
+    #[test]
+    fn parse_plan_mode() {
+        assert_eq!(parse("\\plan").cmd, MetaCmd::PlanMode);
+    }
+
+    #[test]
+    fn parse_yolo_mode() {
+        assert_eq!(parse("\\yolo").cmd, MetaCmd::YoloMode);
+    }
+
+    #[test]
+    fn parse_observe_mode() {
+        assert_eq!(parse("\\observe").cmd, MetaCmd::ObserveMode);
+    }
+
+    #[test]
+    fn parse_interactive_mode() {
+        assert_eq!(parse("\\interactive").cmd, MetaCmd::InteractiveMode);
+    }
+
+    #[test]
+    fn parse_plan_does_not_steal_p() {
+        // Bare \p should still be PrintBuffer, not PlanMode
+        assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
+    }
+
+    #[test]
+    fn parse_observe_does_not_steal_o() {
+        // Bare \o should still be Output, not ObserveMode
+        assert_eq!(parse("\\o").cmd, MetaCmd::Output);
     }
 }

@@ -115,12 +115,30 @@ impl TxState {
 ///
 /// Format: `dbname=>` (idle), `dbname=*>` (in-tx), `dbname=!>` (failed).
 /// Continuation uses `-` instead of `=` as the first separator.
-pub fn build_prompt(dbname: &str, tx: TxState, continuation: bool) -> String {
+pub fn build_prompt(
+    dbname: &str,
+    tx: TxState,
+    continuation: bool,
+    input_mode: InputMode,
+    exec_mode: ExecMode,
+) -> String {
     let infix = tx.infix();
+    // Show the most specific non-default mode tag.  When the execution mode
+    // is not Interactive it takes priority; otherwise we fall back to the
+    // input mode (only non-default, i.e. text2sql, gets a tag).
+    let mode_tag = match exec_mode {
+        ExecMode::Plan => " plan",
+        ExecMode::Yolo => " yolo",
+        ExecMode::Observe => " observe",
+        ExecMode::Interactive => match input_mode {
+            InputMode::Text2Sql => " text2sql",
+            InputMode::Sql => "",
+        },
+    };
     if continuation {
-        format!("{dbname}-{infix}> ")
+        format!("{dbname}{mode_tag}-{infix}> ")
     } else {
-        format!("{dbname}={infix}> ")
+        format!("{dbname}{mode_tag}={infix}> ")
     }
 }
 
@@ -250,6 +268,44 @@ pub fn is_complete(buf: &str) -> bool {
 pub use crate::output::ExpandedMode;
 
 // ---------------------------------------------------------------------------
+// Input mode
+// ---------------------------------------------------------------------------
+
+/// The current input interpretation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// Standard SQL input (default). Lines are accumulated and executed
+    /// when a semicolon terminator is found.
+    #[default]
+    Sql,
+    /// Text-to-SQL mode. Each non-empty line is treated as a natural
+    /// language prompt and forwarded to `/ask`.  Lines starting with `;`
+    /// are sent as raw SQL.
+    Text2Sql,
+}
+
+// ---------------------------------------------------------------------------
+// Execution mode
+// ---------------------------------------------------------------------------
+
+/// Controls *how much* the AI can do without asking.
+///
+/// Orthogonal to [`InputMode`] — any input mode can combine with any
+/// execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    /// AI always shows generated SQL and asks before executing (default).
+    #[default]
+    Interactive,
+    /// AI investigates (read-only) and produces a plan document.
+    Plan,
+    /// AI auto-executes within configured autonomy level.
+    Yolo,
+    /// Pure read-only observation — AI watches and reports.
+    Observe,
+}
+
+// ---------------------------------------------------------------------------
 // Last-error context (used by /fix)
 // ---------------------------------------------------------------------------
 
@@ -333,6 +389,10 @@ pub struct ReplSettings {
     ///
     /// Used by `\c @profile` to look up named connection profiles.
     pub config: crate::config::Config,
+    /// Current input interpretation mode.
+    pub input_mode: InputMode,
+    /// Current execution mode (how much the AI can do without asking).
+    pub exec_mode: ExecMode,
     /// Context from the most-recently failed query.
     ///
     /// Populated whenever a query returns an error; cleared on the next
@@ -378,6 +438,8 @@ impl std::fmt::Debug for ReplSettings {
             .field("pager_enabled", &self.pager_enabled)
             .field("destructive_warning", &self.destructive_warning)
             .field("config_profiles", &self.config.connections.len())
+            .field("input_mode", &self.input_mode)
+            .field("exec_mode", &self.exec_mode)
             .field(
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
@@ -413,6 +475,8 @@ impl Default for ReplSettings {
             // Warn before destructive statements by default.
             destructive_warning: true,
             config: crate::config::Config::default(),
+            input_mode: InputMode::default(),
+            exec_mode: ExecMode::default(),
             last_error: None,
         }
     }
@@ -1926,7 +1990,22 @@ Describe commands (stubs; see #27 for full implementation):
   \des [pattern]    list foreign servers
   \dew [pattern]    list foreign-data wrappers
   \det [pattern]    list foreign tables via FDW
-  \deu [pattern]    list user mappings"
+  \deu [pattern]    list user mappings
+
+AI commands:
+  /ask <prompt>     natural language to SQL
+  /explain          explain the last query plan
+  /fix              diagnose and fix the last error
+  /optimize <query> suggest query optimizations
+
+Input/execution modes:
+  \sql              switch to SQL input mode (default)
+  \text2sql / \t2s  switch to text2sql input mode
+  \plan             enter plan execution mode
+  \yolo             enter YOLO execution mode
+  \observe          enter observe execution mode
+  \interactive      return to interactive mode (default)
+  \mode             show current input and execution mode"
     );
 }
 
@@ -2310,6 +2389,12 @@ pub enum MetaResult {
     ///
     /// Sends `DEALLOCATE name` to the server and removes it from the local map.
     ClosePrepared(String),
+    /// Switch input mode (`\sql`, `\text2sql`, `\t2s`).
+    SetInputMode(InputMode),
+    /// Switch execution mode (`\plan`, `\yolo`, `\observe`, `\interactive`).
+    SetExecMode(ExecMode),
+    /// Show current mode summary (`\mode`).
+    ShowMode,
 }
 
 /// Default `\watch` interval in seconds.
@@ -2664,6 +2749,27 @@ async fn dispatch_meta(
         MetaCmd::Copyright => {
             print_copyright();
         }
+        MetaCmd::SqlMode => {
+            return MetaResult::SetInputMode(InputMode::Sql);
+        }
+        MetaCmd::Text2SqlMode => {
+            return MetaResult::SetInputMode(InputMode::Text2Sql);
+        }
+        MetaCmd::ShowMode => {
+            return MetaResult::ShowMode;
+        }
+        MetaCmd::PlanMode => {
+            return MetaResult::SetExecMode(ExecMode::Plan);
+        }
+        MetaCmd::YoloMode => {
+            return MetaResult::SetExecMode(ExecMode::Yolo);
+        }
+        MetaCmd::ObserveMode => {
+            return MetaResult::SetExecMode(ExecMode::Observe);
+        }
+        MetaCmd::InteractiveMode => {
+            return MetaResult::SetExecMode(ExecMode::Interactive);
+        }
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
@@ -2967,7 +3073,13 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
-        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty());
+        let prompt = build_prompt(
+            &params.dbname,
+            *tx,
+            !buf.is_empty(),
+            settings.input_mode,
+            settings.exec_mode,
+        );
 
         match rl.readline(&prompt) {
             Ok(line) => {
@@ -3049,7 +3161,13 @@ async fn run_dumb_loop(
 
     loop {
         // Print prompt to stderr (so it doesn't mix with redirected output).
-        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty());
+        let prompt = build_prompt(
+            &params.dbname,
+            *tx,
+            !buf.is_empty(),
+            settings.input_mode,
+            settings.exec_mode,
+        );
         eprint!("{prompt}");
         let _ = io::stderr().flush();
 
@@ -3421,6 +3539,40 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::Continue
         }
+        MetaResult::SetInputMode(mode) => {
+            settings.input_mode = mode;
+            let label = match mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            };
+            eprintln!("Input mode: {label}");
+            HandleLineResult::Continue
+        }
+        MetaResult::SetExecMode(mode) => {
+            settings.exec_mode = mode;
+            let label = match mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+                ExecMode::Observe => "observe",
+            };
+            eprintln!("Execution mode: {label}");
+            HandleLineResult::Continue
+        }
+        MetaResult::ShowMode => {
+            let input_label = match settings.input_mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            };
+            let exec_label = match settings.exec_mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+                ExecMode::Observe => "observe",
+            };
+            eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+            HandleLineResult::Continue
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -3446,6 +3598,37 @@ async fn handle_line(
         stmt_buf.clear();
         stmt_buf.push_str(line);
         dispatch_ai_command(trimmed, client, params, settings, tx).await;
+        return HandleLineResult::Continue;
+    }
+
+    // Text2SQL mode: non-empty lines that don't start with `\` or `;` are
+    // treated as natural language prompts forwarded to `/ask`.
+    // Lines starting with `;` are sent as raw SQL (the `;` prefix is stripped).
+    if settings.input_mode == InputMode::Text2Sql
+        && !trimmed.is_empty()
+        && !trimmed.starts_with('\\')
+    {
+        stmt_buf.clear();
+        stmt_buf.push_str(line);
+        if let Some(raw_sql) = trimmed.strip_prefix(';') {
+            let sql = raw_sql.trim();
+            if !sql.is_empty() {
+                execute_query(client, sql, settings, tx).await;
+            }
+        } else {
+            // Forward as AI prompt — behavior depends on execution mode.
+            match settings.exec_mode {
+                ExecMode::Plan => {
+                    handle_ai_plan(client, trimmed, settings, params).await;
+                }
+                ExecMode::Interactive | ExecMode::Yolo => {
+                    handle_ai_ask(client, trimmed, settings, params, tx).await;
+                }
+                ExecMode::Observe => {
+                    eprintln!("Observe mode is read-only. Use \\interactive to switch back.");
+                }
+            }
+        }
         return HandleLineResult::Continue;
     }
 
@@ -3637,6 +3820,40 @@ async fn handle_line(
                          does not exist"
                     );
                 }
+                HandleLineResult::Continue
+            }
+            MetaResult::SetInputMode(mode) => {
+                settings.input_mode = mode;
+                let label = match mode {
+                    InputMode::Sql => "sql",
+                    InputMode::Text2Sql => "text2sql",
+                };
+                eprintln!("Input mode: {label}");
+                HandleLineResult::Continue
+            }
+            MetaResult::SetExecMode(mode) => {
+                settings.exec_mode = mode;
+                let label = match mode {
+                    ExecMode::Interactive => "interactive",
+                    ExecMode::Plan => "plan",
+                    ExecMode::Yolo => "yolo",
+                    ExecMode::Observe => "observe",
+                };
+                eprintln!("Execution mode: {label}");
+                HandleLineResult::Continue
+            }
+            MetaResult::ShowMode => {
+                let input_label = match settings.input_mode {
+                    InputMode::Sql => "sql",
+                    InputMode::Text2Sql => "text2sql",
+                };
+                let exec_label = match settings.exec_mode {
+                    ExecMode::Interactive => "interactive",
+                    ExecMode::Plan => "plan",
+                    ExecMode::Yolo => "yolo",
+                    ExecMode::Observe => "observe",
+                };
+                eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
                 HandleLineResult::Continue
             }
             MetaResult::Continue => HandleLineResult::Continue,
@@ -3850,7 +4067,10 @@ async fn dispatch_ai_command(
             eprintln!("Usage: /ask <natural language description>");
             return;
         }
-        handle_ai_ask(client, prompt, settings, params, tx).await;
+        match settings.exec_mode {
+            ExecMode::Plan => handle_ai_plan(client, prompt, settings, params).await,
+            _ => handle_ai_ask(client, prompt, settings, params, tx).await,
+        }
     } else if input == "/fix" || input.starts_with("/fix ") {
         handle_ai_fix(client, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
@@ -4015,9 +4235,13 @@ async fn handle_ai_ask(
 
     // Decide whether to execute.
     let read_only = !is_write_query(sql);
-    let auto_exec = read_only && settings.config.ai.auto_execute_readonly;
+    let yolo = settings.exec_mode == ExecMode::Yolo;
+    let auto_exec = yolo || (read_only && settings.config.ai.auto_execute_readonly);
 
     let should_execute = if auto_exec {
+        if yolo && !read_only {
+            eprintln!("-- YOLO: auto-executing write query");
+        }
         true
     } else {
         ask_yn_prompt(
@@ -4032,6 +4256,128 @@ async fn handle_ai_ask(
 
     if should_execute {
         execute_query(client, sql, settings, tx).await;
+    }
+}
+
+/// Handle a plan-mode prompt.
+///
+/// Gathers schema context, sends the user's natural-language prompt to the
+/// LLM with a plan-generation system prompt, and streams the resulting plan.
+/// Offers to save the plan to `~/.local/share/samo/plans/`.
+async fn handle_ai_plan(
+    client: &Client,
+    prompt: &str,
+    settings: &ReplSettings,
+    params: &ConnParams,
+) {
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+
+    if provider_name.is_empty() {
+        eprintln!(
+            "AI not configured. \
+             Add an [ai] section to ~/.config/samo/config.toml"
+        );
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    let system_content = format!(
+        "You are a PostgreSQL expert. \
+         The user has asked you to investigate and produce an action plan.\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n\n\
+         Rules:\n\
+         - Produce a structured plan in markdown format\n\
+         - Each action should include the SQL command and a safety assessment\n\
+         - Mark actions as [safe], [caution], or [dangerous]\n\
+         - Order actions from safest to most impactful\n\
+         - Include estimated duration where possible\n\
+         - Start with a brief root-cause analysis\n\
+         - Do NOT execute anything — only plan",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: prompt.to_owned(),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    eprintln!("-- Plan mode: investigating...");
+    let result = match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Offer to save the plan.
+    if ask_yn_prompt("Save this plan? [y/N] ", false) {
+        let plans_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("samo")
+            .join("plans");
+        if let Err(e) = std::fs::create_dir_all(&plans_dir) {
+            eprintln!("Cannot create plans directory: {e}");
+            return;
+        }
+        let date = format_system_time(std::time::SystemTime::now())
+            .replace(' ', "-")
+            .replace(':', "");
+        // Build a slug from the first few words of the prompt.
+        let slug: String = prompt
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("-")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect();
+        let filename = format!("{date}-{slug}.md");
+        let path = plans_dir.join(&filename);
+        match std::fs::write(&path, &result.content) {
+            Ok(()) => eprintln!("Saved to: {}", path.display()),
+            Err(e) => eprintln!("Failed to save plan: {e}"),
+        }
     }
 }
 
@@ -4878,32 +5224,158 @@ mod tests {
 
     #[test]
     fn prompt_idle() {
-        assert_eq!(build_prompt("mydb", TxState::Idle, false), "mydb=> ");
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
+            "mydb=> "
+        );
     }
 
     #[test]
     fn prompt_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, false),
+            build_prompt(
+                "mydb",
+                TxState::InTransaction,
+                false,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb=*> "
         );
     }
 
     #[test]
     fn prompt_failed_transaction() {
-        assert_eq!(build_prompt("mydb", TxState::Failed, false), "mydb=!> ");
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Failed,
+                false,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
+            "mydb=!> "
+        );
     }
 
     #[test]
     fn prompt_continuation() {
-        assert_eq!(build_prompt("mydb", TxState::Idle, true), "mydb-> ");
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                true,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
+            "mydb-> "
+        );
     }
 
     #[test]
     fn prompt_continuation_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, true),
+            build_prompt(
+                "mydb",
+                TxState::InTransaction,
+                true,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb-*> "
+        );
+    }
+
+    #[test]
+    fn prompt_text2sql_mode() {
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Text2Sql,
+                ExecMode::Interactive
+            ),
+            "mydb text2sql=> "
+        );
+    }
+
+    #[test]
+    fn prompt_text2sql_continuation() {
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                true,
+                InputMode::Text2Sql,
+                ExecMode::Interactive
+            ),
+            "mydb text2sql-> "
+        );
+    }
+
+    #[test]
+    fn prompt_text2sql_in_transaction() {
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::InTransaction,
+                false,
+                InputMode::Text2Sql,
+                ExecMode::Interactive
+            ),
+            "mydb text2sql=*> "
+        );
+    }
+
+    #[test]
+    fn prompt_plan_mode() {
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, false, InputMode::Sql, ExecMode::Plan),
+            "mydb plan=> "
+        );
+    }
+
+    #[test]
+    fn prompt_yolo_mode() {
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, false, InputMode::Sql, ExecMode::Yolo),
+            "mydb yolo=> "
+        );
+    }
+
+    #[test]
+    fn prompt_observe_mode() {
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Sql,
+                ExecMode::Observe
+            ),
+            "mydb observe=> "
+        );
+    }
+
+    #[test]
+    fn prompt_plan_overrides_text2sql() {
+        // Execution mode tag takes priority over input mode tag.
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Text2Sql,
+                ExecMode::Plan
+            ),
+            "mydb plan=> "
         );
     }
 
