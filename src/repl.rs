@@ -40,8 +40,7 @@ const HISTORY_SIZE: usize = 2000;
 /// rather than an environment variable name, use it directly but warn the user.
 /// Otherwise, treat it as an env-var name and look it up.
 /// Track whether we've already warned about raw API keys in this session.
-static RAW_KEY_WARNED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static RAW_KEY_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
     let env_or_key = api_key_env?;
@@ -73,9 +72,8 @@ fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
         Ok(val) if !val.is_empty() => Some(val),
         _ => {
             eprintln!(
-                "ERROR: environment variable '{}' is not set. \
-                 Set it with: export {}=\"your-api-key\"",
-                env_or_key, env_or_key
+                "ERROR: environment variable '{env_or_key}' is not set. \
+                 Set it with: export {env_or_key}=\"your-api-key\""
             );
             None
         }
@@ -7664,10 +7662,7 @@ mod tests {
     fn resolve_api_key_raw_anthropic() {
         RAW_KEY_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
         let result = resolve_api_key(Some("sk-ant-api03-abcdefghijklmnop"));
-        assert_eq!(
-            result,
-            Some("sk-ant-api03-abcdefghijklmnop".to_owned())
-        );
+        assert_eq!(result, Some("sk-ant-api03-abcdefghijklmnop".to_owned()));
     }
 
     #[test]
