@@ -7,6 +7,8 @@ use clap::Parser;
 
 mod actor;
 mod ai;
+#[allow(dead_code)]
+mod anomaly;
 mod capabilities;
 mod complete;
 mod conditional;
@@ -18,6 +20,8 @@ mod dba;
 mod describe;
 mod governance;
 mod highlight;
+#[allow(dead_code)]
+mod index_health;
 mod io;
 mod logging;
 mod metacmd;
@@ -29,9 +33,12 @@ mod pattern;
 #[allow(dead_code)]
 mod query;
 mod rca;
+#[allow(dead_code)]
+mod rca_actions;
 mod repl;
 mod safety;
 mod session;
+mod setup;
 mod vars;
 
 /// Build-time git commit hash injected by `build.rs`.
@@ -275,6 +282,10 @@ struct Cli {
     /// Set log verbosity level (error, warn, info, debug, trace) (FR-14).
     #[arg(long, value_name = "LEVEL")]
     log_level: Option<String>,
+
+    /// Generate `samo_ops` wrapper SQL and exit. Specify PG version (e.g. 14, 16).
+    #[arg(long, value_name = "PG_VERSION", default_missing_value = "16", num_args = 0..=1)]
+    generate_wrappers: Option<String>,
 }
 
 impl Cli {
@@ -493,6 +504,13 @@ async fn main() {
     });
 
     logging::init(log_level, log_writer);
+
+    // --generate-wrappers: emit SQL and exit (no DB connection needed).
+    if let Some(ref pg_ver_str) = cli.generate_wrappers {
+        let pg_version: u32 = pg_ver_str.parse().unwrap_or(16);
+        print!("{}", setup::generate_setup_sql(pg_version));
+        return;
+    }
 
     // Load config hierarchy (system then user); non-fatal warnings are
     // printed to stderr unless --quiet suppresses them.
