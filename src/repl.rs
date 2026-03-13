@@ -250,6 +250,21 @@ pub fn is_complete(buf: &str) -> bool {
 pub use crate::output::ExpandedMode;
 
 // ---------------------------------------------------------------------------
+// Last-error context (used by /fix)
+// ---------------------------------------------------------------------------
+
+/// Context captured when a query fails, so `/fix` can explain and correct it.
+#[derive(Debug, Clone)]
+pub struct LastError {
+    /// The SQL query that failed.
+    pub query: String,
+    /// Human-readable error message from the server.
+    pub error_message: String,
+    /// Optional SQLSTATE code (e.g. `"42703"` for undefined column).
+    pub sqlstate: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // REPL settings (mutable at runtime via backslash commands)
 // ---------------------------------------------------------------------------
 
@@ -318,6 +333,12 @@ pub struct ReplSettings {
     ///
     /// Used by `\c @profile` to look up named connection profiles.
     pub config: crate::config::Config,
+    /// Context from the most-recently failed query.
+    ///
+    /// Populated whenever a query returns an error; cleared on the next
+    /// successful execution.  Used by `/fix` to provide the LLM with the
+    /// query and error details.
+    pub last_error: Option<LastError>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -357,6 +378,10 @@ impl std::fmt::Debug for ReplSettings {
             .field("pager_enabled", &self.pager_enabled)
             .field("destructive_warning", &self.destructive_warning)
             .field("config_profiles", &self.config.connections.len())
+            .field(
+                "last_error",
+                &self.last_error.as_ref().map(|e| e.error_message.as_str()),
+            )
             .finish()
     }
 }
@@ -388,6 +413,7 @@ impl Default for ReplSettings {
             // Warn before destructive statements by default.
             destructive_warning: true,
             config: crate::config::Config::default(),
+            last_error: None,
         }
     }
 }
@@ -545,6 +571,7 @@ fn confirm_single_step(sql: &str) -> bool {
 /// then renders output using `settings.pset`.
 ///
 /// Returns `true` on success, `false` if the query produced a SQL error.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_query(
     client: &Client,
     sql: &str,
@@ -664,6 +691,15 @@ pub async fn execute_query(
             }
             eprintln!("ERROR:  {e}");
             tx.on_error();
+
+            // Capture context for /fix.
+            let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            settings.last_error = Some(LastError {
+                query: sql_to_send.to_owned(),
+                error_message: e.to_string(),
+                sqlstate,
+            });
+
             false
         }
     };
@@ -677,6 +713,8 @@ pub async fn execute_query(
     // Store as the last successfully executed query (used by `\watch`).
     if success {
         settings.last_query = Some(sql.to_owned());
+        // Clear last_error on success so /fix isn't stale.
+        settings.last_error = None;
     }
 
     success
@@ -747,6 +785,12 @@ pub async fn execute_query_extended(
             }
             eprintln!("ERROR:  {e}");
             tx.on_error();
+            let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            settings.last_error = Some(LastError {
+                query: sql_to_send.to_owned(),
+                error_message: e.to_string(),
+                sqlstate,
+            });
             return false;
         }
     };
@@ -828,6 +872,15 @@ pub async fn execute_query_extended(
             }
             eprintln!("ERROR:  {e}");
             tx.on_error();
+
+            // Capture context for /fix.
+            let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            settings.last_error = Some(LastError {
+                query: sql_to_send.to_owned(),
+                error_message: e.to_string(),
+                sqlstate,
+            });
+
             false
         }
     };
@@ -839,6 +892,8 @@ pub async fn execute_query_extended(
 
     if success {
         settings.last_query = Some(sql.to_owned());
+        // Clear last_error on success so /fix isn't stale.
+        settings.last_error = None;
     }
 
     success
@@ -3390,7 +3445,7 @@ async fn handle_line(
     if trimmed.starts_with('/') {
         stmt_buf.clear();
         stmt_buf.push_str(line);
-        dispatch_ai_command(trimmed, client, params, settings).await;
+        dispatch_ai_command(trimmed, client, params, settings, tx).await;
         return HandleLineResult::Continue;
     }
 
@@ -3751,31 +3806,57 @@ async fn handle_line(
 // AI command helpers
 // ---------------------------------------------------------------------------
 
+/// Stream an LLM completion to stdout, printing tokens as they arrive.
+///
+/// Falls back to printing the full response at once if the provider does
+/// not implement true streaming.
+async fn stream_completion(
+    provider: &dyn crate::ai::LlmProvider,
+    messages: &[crate::ai::Message],
+    options: &crate::ai::CompletionOptions,
+) -> Result<crate::ai::CompletionResult, String> {
+    use std::io::Write;
+
+    let result = provider
+        .complete_streaming(
+            messages,
+            options,
+            Box::new(|token| {
+                print!("{token}");
+                let _ = io::stdout().flush();
+            }),
+        )
+        .await?;
+    println!();
+    Ok(result)
+}
+
 /// Dispatch a `/`-prefixed AI command.
 ///
 /// Recognised commands:
 /// - `/ask <prompt>` — generate SQL from natural language
-/// - `/fix` — explain and fix the last error (stub)
+/// - `/fix` — explain and fix the last error
 /// - `/explain [query]` — explain query plan with AI interpretation
-/// - `/optimize [query]` — suggest query optimizations (stub)
+/// - `/optimize [query]` — suggest query optimizations
 async fn dispatch_ai_command(
     input: &str,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
+    tx: &mut TxState,
 ) {
     if let Some(prompt) = input.strip_prefix("/ask").map(str::trim) {
         if prompt.is_empty() {
             eprintln!("Usage: /ask <natural language description>");
             return;
         }
-        handle_ai_ask(client, prompt, settings, params).await;
+        handle_ai_ask(client, prompt, settings, params, tx).await;
     } else if input == "/fix" || input.starts_with("/fix ") {
-        eprintln!("/fix: not yet implemented");
+        handle_ai_fix(client, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
         handle_ai_explain(client, query_arg, settings, params).await;
-    } else if input == "/optimize" || input.starts_with("/optimize ") {
-        eprintln!("/optimize: not yet implemented");
+    } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
+        handle_ai_optimize(client, query_arg, settings, params).await;
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
@@ -3784,16 +3865,61 @@ async fn dispatch_ai_command(
     }
 }
 
+/// Strip markdown code fences from LLM output.
+///
+/// LLMs sometimes wrap SQL in `` ```sql ... ``` `` blocks.  This function
+/// removes the fences and returns the inner content, trimmed.  If no fences
+/// are found, the original string is returned as-is.
+fn strip_sql_fences(s: &str) -> &str {
+    let trimmed = s.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // Skip optional language tag on the opening fence line.
+        let after_tag = rest.find('\n').map_or(rest, |i| &rest[i + 1..]);
+        // Remove closing fence.
+        let body = if let Some(pos) = after_tag.rfind("```") {
+            &after_tag[..pos]
+        } else {
+            after_tag
+        };
+        body.trim()
+    } else {
+        trimmed
+    }
+}
+
+/// Prompt the user with a yes/no question and return their answer.
+///
+/// `default_yes` controls what happens when the user presses Enter without
+/// typing anything: `true` → default is yes, `false` → default is no.
+fn ask_yn_prompt(prompt: &str, default_yes: bool) -> bool {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    let answer = input.trim().to_lowercase();
+    if answer.is_empty() {
+        return default_yes;
+    }
+    answer.starts_with('y')
+}
+
 /// Handle a `/ask <prompt>` command end-to-end.
 ///
 /// Checks AI configuration, builds schema context, sends the prompt to the
-/// configured LLM, and prints the generated SQL.  Gracefully degrades with
-/// a helpful message when AI is not configured.
+/// configured LLM, prints the generated SQL with syntax highlighting, and
+/// prompts `[Y/n]` to execute.  Read-only queries auto-execute when
+/// `ai.auto_execute_readonly` is set.
+#[allow(clippy::too_many_lines)]
 async fn handle_ai_ask(
     client: &Client,
     prompt: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &ConnParams,
+    tx: &mut TxState,
 ) {
     let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
 
@@ -3869,11 +3995,153 @@ async fn handle_ai_ask(
         temperature: 0.0,
     };
 
-    match provider.complete(&messages, &options).await {
-        Ok(result) => {
-            println!("{}", result.content);
-            // TODO: prompt user to execute, track token usage (#75)
+    let generated_sql = match provider.complete(&messages, &options).await {
+        Ok(result) => result.content,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
         }
+    };
+
+    // Strip markdown fences if present (LLMs sometimes wrap in ```sql ... ```).
+    let sql = strip_sql_fences(&generated_sql);
+
+    // Display with syntax highlighting when available.
+    if settings.no_highlight {
+        println!("{sql}");
+    } else {
+        println!("{}", crate::highlight::highlight_sql(sql));
+    }
+
+    // Decide whether to execute.
+    let read_only = !is_write_query(sql);
+    let auto_exec = read_only && settings.config.ai.auto_execute_readonly;
+
+    let should_execute = if auto_exec {
+        true
+    } else {
+        ask_yn_prompt(
+            if read_only {
+                "Execute? [Y/n] "
+            } else {
+                "Execute (write query)? [y/N] "
+            },
+            read_only,
+        )
+    };
+
+    if should_execute {
+        execute_query(client, sql, settings, tx).await;
+    }
+}
+
+/// Handle a `/fix` command end-to-end.
+///
+/// Looks up the most recently failed query from [`ReplSettings::last_error`],
+/// sends it to the configured LLM with schema context, and prints an
+/// explanation plus a corrected SQL query.  Gracefully degrades when no
+/// prior error exists or when AI is not configured.
+async fn handle_ai_fix(client: &Client, settings: &ReplSettings, params: &ConnParams) {
+    // Require a prior error to fix.
+    let last_error = if let Some(e) = &settings.last_error {
+        e.clone()
+    } else {
+        eprintln!("No recent error to fix. Run a query first.");
+        return;
+    };
+
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+
+    if provider_name.is_empty() {
+        eprintln!(
+            "AI not configured. \
+             Add an [ai] section to ~/.config/samo/config.toml"
+        );
+        eprintln!("Supported providers: anthropic, openai, ollama");
+        eprintln!("Example:");
+        eprintln!("  [ai]");
+        eprintln!("  provider = \"anthropic\"");
+        eprintln!("  api_key_env = \"ANTHROPIC_API_KEY\"");
+        return;
+    }
+
+    // Resolve the API key from the configured environment variable.
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Build a compact schema description for the system prompt.
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    // Format the SQLSTATE hint if available.
+    let sqlstate_hint = last_error
+        .sqlstate
+        .as_deref()
+        .map(|s| format!(" (SQLSTATE {s})"))
+        .unwrap_or_default();
+
+    let system_content = format!(
+        "You are a PostgreSQL expert. \
+         Explain SQL errors and provide corrected queries.\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n\n\
+         Rules:\n\
+         - First, briefly explain what caused the error (1-2 sentences)\n\
+         - Then output the corrected SQL query\n\
+         - Use standard PostgreSQL syntax\n\
+         - Keep the corrected query as close to the original intent as possible",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let user_content = format!(
+        "The following query failed{sqlstate_hint}:\n\n\
+         ```sql\n{query}\n```\n\n\
+         Error: {error}",
+        query = last_error.query,
+        error = last_error.error_message,
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: user_content,
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(_result) => {}
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -4029,9 +4297,229 @@ async fn handle_ai_explain(
     };
 
     println!();
-    match provider.complete(&ai_messages, &options).await {
-        Ok(result) => println!("{}", result.content),
-        Err(e) => eprintln!("AI error: {e}"),
+    if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        eprintln!("AI error: {e}");
+    }
+}
+
+/// Extract table names referenced by `FROM` and `JOIN` clauses.
+///
+/// Best-effort heuristic parser — handles common patterns including
+/// schema-qualified names but does not aim for full SQL parsing.
+/// Used by `/optimize` to query `pg_stat_user_tables`.
+fn extract_table_names(sql: &str) -> Vec<String> {
+    let upper = sql.to_uppercase();
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+    let upper_tokens: Vec<String> = upper.split_whitespace().map(String::from).collect();
+    let mut tables = Vec::new();
+
+    let mut i = 0;
+    while i < upper_tokens.len() {
+        let is_from = upper_tokens[i] == "FROM";
+        let is_join = upper_tokens[i].ends_with("JOIN") && upper_tokens[i] != "DISJOIN";
+
+        if (is_from || is_join) && i + 1 < tokens.len() {
+            let candidate = tokens[i + 1];
+            // Skip sub-selects: FROM (SELECT ...)
+            if !candidate.starts_with('(') {
+                let clean = candidate.trim_end_matches([',', ')', ';']);
+                if !clean.is_empty() {
+                    tables.push(clean.to_owned());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    tables.sort();
+    tables.dedup();
+    tables
+}
+
+/// Handle a `/optimize [query]` command end-to-end.
+///
+/// 1. Resolves the target query: inline arg or `last_query`.
+/// 2. Runs `EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT TEXT)`.
+/// 3. Gathers `pg_stat_user_tables` stats for referenced tables.
+/// 4. Sends plan + stats + schema context to the LLM for optimization
+///    suggestions (index creation, query rewrites, join order changes).
+#[allow(clippy::too_many_lines)]
+async fn handle_ai_optimize(
+    client: &Client,
+    query_arg: &str,
+    settings: &ReplSettings,
+    params: &ConnParams,
+) {
+    // Resolve target query.
+    let target_query = if query_arg.is_empty() {
+        if let Some(q) = settings.last_query.as_deref() {
+            q.to_owned()
+        } else {
+            eprintln!(
+                "/optimize: no query to optimize. \
+                 Run a query first or provide one: /optimize SELECT ..."
+            );
+            return;
+        }
+    } else {
+        query_arg.to_owned()
+    };
+
+    // Run EXPLAIN ANALYZE (wrapped in BEGIN/ROLLBACK for write queries).
+    let explain_sql = build_explain_sql(&target_query);
+
+    let raw_messages = match client.simple_query(&explain_sql).await {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            return;
+        }
+    };
+
+    // Collect plan lines.
+    let mut plan_lines: Vec<String> = Vec::new();
+    for msg in &raw_messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            if let Some(line) = row.get(0) {
+                plan_lines.push(line.to_owned());
+            }
+        }
+    }
+
+    if plan_lines.is_empty() {
+        eprintln!("/optimize: EXPLAIN returned no output");
+        return;
+    }
+
+    let plan_text = plan_lines.join("\n");
+    println!("{plan_text}");
+
+    // Gather table statistics for referenced tables.
+    let table_names = extract_table_names(&target_query);
+    let mut stats_text = String::new();
+
+    if !table_names.is_empty() {
+        let in_list: String = table_names
+            .iter()
+            .map(|t| {
+                let escaped = t.replace('\'', "''");
+                format!("'{escaped}'")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let stats_sql = format!(
+            "SELECT schemaname || '.' || relname AS table_name, \
+                    n_live_tup, n_dead_tup, \
+                    seq_scan, seq_tup_read, \
+                    idx_scan, idx_tup_fetch, \
+                    last_vacuum::text, last_analyze::text \
+             FROM pg_stat_user_tables \
+             WHERE relname IN ({in_list}) \
+                OR schemaname || '.' || relname IN ({in_list}) \
+             ORDER BY relname"
+        );
+
+        if let Ok(msgs) = client.simple_query(&stats_sql).await {
+            let mut stat_rows = Vec::new();
+            for msg in &msgs {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let cols: Vec<String> = (0..9)
+                        .map(|i| row.get(i).unwrap_or("(null)").to_owned())
+                        .collect();
+                    stat_rows.push(cols.join(" | "));
+                }
+            }
+            if !stat_rows.is_empty() {
+                stats_text = format!(
+                    "\n\nTable statistics (table | live_tup | dead_tup | \
+                     seq_scan | seq_tup_read | idx_scan | idx_tup_fetch | \
+                     last_vacuum | last_analyze):\n{}",
+                    stat_rows.join("\n")
+                );
+            }
+        }
+    }
+
+    // AI optimization — skip gracefully when AI is not configured.
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+    if provider_name.is_empty() {
+        eprintln!(
+            "\nAI not configured — showing raw plan only. \
+             Add an [ai] section to ~/.config/samo/config.toml for optimization suggestions."
+        );
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    let system_content = format!(
+        "You are a PostgreSQL performance optimization expert. \
+         Analyse the query, its EXPLAIN ANALYZE plan, and table statistics, \
+         then provide actionable optimization suggestions.\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n\n\
+         Rules:\n\
+         - Identify the most expensive operations in the plan\n\
+         - Suggest specific CREATE INDEX statements when beneficial\n\
+         - Suggest query rewrites (join order, CTEs, subquery elimination)\n\
+         - Note any sequential scans on large tables\n\
+         - Estimate the expected improvement for each suggestion\n\
+         - Output suggestions ordered by expected impact (highest first)",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let user_content = format!(
+        "Query:\n```sql\n{target_query}\n```\n\n\
+         EXPLAIN ANALYZE output:\n{plan_text}{stats_text}"
+    );
+
+    let ai_messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: user_content,
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    println!();
+    if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        eprintln!("AI error: {e}");
     }
 }
 
@@ -4669,5 +5157,151 @@ mod tests {
         let sql = build_explain_sql("DELETE FROM t WHERE id = 1");
         assert!(sql.starts_with("begin;"));
         assert!(sql.ends_with("rollback;"));
+    }
+
+    // -- LastError and /fix ---------------------------------------------------
+
+    #[test]
+    fn last_error_construction() {
+        let err = LastError {
+            query: "select * from nonexistent_table".to_owned(),
+            error_message: "relation \"nonexistent_table\" does not exist".to_owned(),
+            sqlstate: Some("42P01".to_owned()),
+        };
+        assert_eq!(err.query, "select * from nonexistent_table");
+        assert!(err.error_message.contains("does not exist"));
+        assert_eq!(err.sqlstate.as_deref(), Some("42P01"));
+    }
+
+    #[test]
+    fn last_error_without_sqlstate() {
+        let err = LastError {
+            query: "select 1 +".to_owned(),
+            error_message: "syntax error at end of input".to_owned(),
+            sqlstate: None,
+        };
+        assert!(err.sqlstate.is_none());
+    }
+
+    #[test]
+    fn repl_settings_last_error_default_is_none() {
+        let s = ReplSettings::default();
+        assert!(s.last_error.is_none());
+    }
+
+    #[test]
+    fn last_error_clone() {
+        let err = LastError {
+            query: "select 1".to_owned(),
+            error_message: "some error".to_owned(),
+            sqlstate: Some("42601".to_owned()),
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned.query, err.query);
+        assert_eq!(cloned.error_message, err.error_message);
+        assert_eq!(cloned.sqlstate, err.sqlstate);
+    }
+
+    #[test]
+    fn fix_no_error_message_check() {
+        // When last_error is None, the /fix handler should print "No recent
+        // error to fix." -- verify the condition matches.
+        let settings = ReplSettings::default();
+        assert!(settings.last_error.is_none());
+        // The handler checks: if last_error.is_none() -> print message and return.
+        // We test the predicate here; the async handler itself requires a DB.
+        let would_bail = settings.last_error.is_none();
+        assert!(would_bail);
+    }
+
+    // -- extract_table_names ---------------------------------------------------
+
+    #[test]
+    fn extract_tables_simple_select() {
+        let tables = extract_table_names("SELECT * FROM users WHERE id = 1");
+        assert_eq!(tables, vec!["users"]);
+    }
+
+    #[test]
+    fn extract_tables_join() {
+        let tables =
+            extract_table_names("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id");
+        assert_eq!(tables, vec!["orders", "users"]);
+    }
+
+    #[test]
+    fn extract_tables_left_join() {
+        let tables = extract_table_names(
+            "SELECT * FROM products LEFT JOIN categories ON products.cat_id = categories.id",
+        );
+        assert_eq!(tables, vec!["categories", "products"]);
+    }
+
+    #[test]
+    fn extract_tables_schema_qualified() {
+        let tables = extract_table_names("SELECT * FROM public.users");
+        assert_eq!(tables, vec!["public.users"]);
+    }
+
+    #[test]
+    fn extract_tables_multiple_from() {
+        let tables = extract_table_names("SELECT * FROM a, b WHERE a.id = b.a_id");
+        // Only first token after FROM is captured; comma-separated second
+        // table "b" is not preceded by FROM/JOIN so it's not found.
+        // This is a known limitation of the heuristic parser.
+        assert!(tables.contains(&"a".to_owned()));
+    }
+
+    #[test]
+    fn extract_tables_subselect_skipped() {
+        let tables =
+            extract_table_names("SELECT * FROM (SELECT id FROM inner_t) sub JOIN outer_t ON true");
+        // The sub-select is skipped (starts with '('), but outer_t is captured.
+        assert!(tables.contains(&"outer_t".to_owned()));
+        assert!(!tables.contains(&"(SELECT".to_owned()));
+    }
+
+    #[test]
+    fn extract_tables_empty() {
+        let tables = extract_table_names("SELECT 1");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_deduplicates() {
+        let tables =
+            extract_table_names("SELECT * FROM users u1 JOIN users u2 ON u1.id = u2.partner_id");
+        assert_eq!(tables, vec!["users"]);
+    }
+
+    // -- strip_sql_fences ------------------------------------------------------
+
+    #[test]
+    fn strip_fences_no_fences() {
+        assert_eq!(strip_sql_fences("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn strip_fences_sql_tag() {
+        assert_eq!(strip_sql_fences("```sql\nSELECT 1;\n```"), "SELECT 1;");
+    }
+
+    #[test]
+    fn strip_fences_no_tag() {
+        assert_eq!(strip_sql_fences("```\nSELECT 1;\n```"), "SELECT 1;");
+    }
+
+    #[test]
+    fn strip_fences_with_whitespace() {
+        assert_eq!(
+            strip_sql_fences("  ```sql\n  SELECT 1;  \n```  "),
+            "SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn strip_fences_no_closing_fence() {
+        // Gracefully handles missing closing fence.
+        assert_eq!(strip_sql_fences("```sql\nSELECT 1;"), "SELECT 1;");
     }
 }
