@@ -30,6 +30,7 @@ FAIL=0
 # Column alignment and row counts are left intact — they are exactly what we
 # are testing.
 normalize() {
+  expand | \
   sed -e 's/[[:space:]]*$//' | \
   awk '
     /^$/ { blank++; next }
@@ -346,9 +347,8 @@ compare_flags "expanded with null" \
 compare "\\sf user_order_count" \
   "\\sf user_order_count"
 
-## \sf+ — line numbering format mismatch (#208)
-# compare "\\sf+ user_order_count" \
-#   "\\sf+ user_order_count"
+compare "\\sf+ user_order_count" \
+  "\\sf+ user_order_count"
 
 compare "\\sv active_products" \
   "\\sv active_products"
