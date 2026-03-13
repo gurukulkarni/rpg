@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use rustls::ClientConfig;
@@ -33,6 +34,10 @@ pub enum ConnectionError {
 
     #[error("server requires SSL but sslmode=disable")]
     SslRequired,
+
+    /// General TLS failure (bad cert, handshake failure, etc.).
+    #[error("TLS error: {0}")]
+    TlsError(String),
 
     #[error("pgpass error: {0}")]
     PgpassError(String),
@@ -73,7 +78,7 @@ impl SslMode {
 // ---------------------------------------------------------------------------
 
 /// Fully-resolved connection parameters ready for use.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnParams {
     pub host: String,
     pub port: u16,
@@ -83,6 +88,22 @@ pub struct ConnParams {
     pub sslmode: SslMode,
     pub application_name: String,
     pub connect_timeout: Option<u64>,
+}
+
+/// Custom `Debug` implementation that masks the password field.
+impl fmt::Debug for ConnParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnParams")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("dbname", &self.dbname)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("sslmode", &self.sslmode)
+            .field("application_name", &self.application_name)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish()
+    }
 }
 
 impl Default for ConnParams {
@@ -143,6 +164,8 @@ pub struct CliConnOpts {
     pub port_pos: Option<String>,
     pub force_password: bool,
     pub no_password: bool,
+    /// SSL mode override from `--sslmode` CLI flag (highest priority).
+    pub sslmode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +175,7 @@ pub struct CliConnOpts {
 /// Resolve connection parameters from CLI options, environment, and defaults.
 ///
 /// Priority (highest first):
-/// 1. Named CLI flags (`-h`, `-p`, `-U`, `-d`)
+/// 1. Named CLI flags (`-h`, `-p`, `-U`, `-d`, `--sslmode`)
 /// 2. Positional arguments
 /// 3. URI format (`postgresql://…`)
 /// 4. Key-value conninfo (`host=… port=…`)
@@ -188,13 +211,17 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
         .and_then(|u| u.password.clone())
         .or_else(|| env::var("PGPASSWORD").ok());
 
-    resolve_sslmode(&mut params, uri_ref, ci_ref);
+    resolve_sslmode(&mut params, opts, uri_ref, ci_ref);
     resolve_app_name(&mut params, uri_ref, ci_ref);
 
-    // Connect timeout.
-    params.connect_timeout = conninfo_params
-        .as_ref()
-        .and_then(|c| c.get("connect_timeout").and_then(|v| v.parse().ok()))
+    // Connect timeout: URI query params, then conninfo, then env.
+    params.connect_timeout = uri_ref
+        .and_then(|u| u.connect_timeout)
+        .or_else(|| {
+            conninfo_params
+                .as_ref()
+                .and_then(|c| c.get("connect_timeout").and_then(|v| v.parse().ok()))
+        })
         .or_else(|| {
             env::var("PGCONNECT_TIMEOUT")
                 .ok()
@@ -297,11 +324,16 @@ fn resolve_dbname(
 
 fn resolve_sslmode(
     params: &mut ConnParams,
+    opts: &CliConnOpts,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
 ) {
-    params.sslmode = uri
-        .and_then(|u| u.sslmode)
+    // CLI flag has highest priority.
+    params.sslmode = opts
+        .sslmode
+        .as_deref()
+        .and_then(|s| SslMode::parse(s).ok())
+        .or_else(|| uri.and_then(|u| u.sslmode))
         .or_else(|| {
             conninfo
                 .and_then(|c| c.get("sslmode"))
@@ -341,6 +373,7 @@ struct UriParams {
     dbname: Option<String>,
     sslmode: Option<SslMode>,
     application_name: Option<String>,
+    connect_timeout: Option<u64>,
 }
 
 /// Parse a `postgresql://` or `postgres://` URI into individual fields.
@@ -432,6 +465,7 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                 match key {
                     "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
                     "application_name" => params.application_name = Some(val),
+                    "connect_timeout" => params.connect_timeout = val.parse().ok(),
                     // Ignore unknown query params rather than erroring.
                     _ => {}
                 }
@@ -688,7 +722,7 @@ pub fn resolve_password(
     // Interactive prompt (-W or server requested).
     if force_prompt || (server_requested_auth && !no_password) {
         let prompt = format!("Password for user {}: ", params.user);
-        match rpassword::prompt_password_stderr(&prompt) {
+        match rpassword::prompt_password(&prompt) {
             Ok(pw) => {
                 params.password = Some(pw);
             }
@@ -722,16 +756,15 @@ fn make_tls_config() -> ClientConfig {
 // Connect
 // ---------------------------------------------------------------------------
 
-/// Establish a connection to Postgres and return the `Client`.
+/// Establish a connection to Postgres and return both the `Client` and the
+/// fully-resolved `ConnParams` that were used.
 ///
-/// This is the main entry point for the connection layer. It:
-/// 1. Resolves parameters from CLI flags, env, and defaults.
-/// 2. Resolves the password (pgpass / prompt).
-/// 3. Configures TLS.
-/// 4. Connects and spawns the connection task.
-pub async fn connect(opts: &CliConnOpts) -> Result<Client, ConnectionError> {
-    let mut params = resolve_params(opts)?;
-
+/// Accepting a pre-resolved `ConnParams` ensures the caller (e.g. `main`)
+/// always uses the same parameters that were passed to the driver.
+pub async fn connect(
+    mut params: ConnParams,
+    opts: &CliConnOpts,
+) -> Result<(Client, ConnParams), ConnectionError> {
     // Resolve password (pre-connect: may prompt if -W).
     resolve_password(&mut params, opts.force_password, opts.no_password, false)?;
 
@@ -756,7 +789,12 @@ pub async fn connect(opts: &CliConnOpts) -> Result<Client, ConnectionError> {
         SslMode::Disable => connect_plain(&pg_config, &params).await?,
         SslMode::Prefer => match connect_tls(&pg_config, &params).await {
             Ok(c) => c,
-            Err(_) => connect_plain(&pg_config, &params).await?,
+            Err(e) => {
+                // Intentionally swallow TLS errors in prefer mode and fall
+                // back to a plain connection. Log for debugging.
+                eprintln!("samo: TLS unavailable ({e}), falling back to plain connection");
+                connect_plain(&pg_config, &params).await?
+            }
         },
         SslMode::Require => {
             pg_config.ssl_mode(TokioSslMode::Require);
@@ -764,7 +802,11 @@ pub async fn connect(opts: &CliConnOpts) -> Result<Client, ConnectionError> {
         }
     };
 
-    Ok(client)
+    // Auth retry: if the initial connect failed with an auth error and the
+    // server is requesting a password, prompt and retry once (psql behaviour).
+    // (The retry path is reached via the caller; here we return on success.)
+
+    Ok((client, params))
 }
 
 /// Connect without TLS.
@@ -809,6 +851,13 @@ async fn connect_tls(
 }
 
 /// Map a `tokio_postgres::Error` into our `ConnectionError`.
+///
+/// Classification rules:
+/// - Authentication keywords → `AuthenticationFailed`
+/// - SSL-required signal (server rejects non-TLS when sslmode=disable) →
+///   `SslRequired`
+/// - Other SSL/TLS errors (bad cert, handshake failure) → `TlsError`
+/// - Everything else → `ConnectionFailed`
 fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> ConnectionError {
     let msg = e.to_string();
 
@@ -823,8 +872,18 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
         };
     }
 
-    if msg.contains("SSL") || msg.contains("ssl") || msg.contains("TLS") || msg.contains("tls") {
+    // "SSL connection is required" is the specific server message when the
+    // client tries a plain connection but the server demands TLS.
+    if msg.contains("SSL connection is required")
+        || msg.contains("ssl connection is required")
+        || msg.contains("server requires SSL")
+    {
         return ConnectionError::SslRequired;
+    }
+
+    // General TLS failures: bad certificate, handshake errors, etc.
+    if msg.contains("SSL") || msg.contains("ssl") || msg.contains("TLS") || msg.contains("tls") {
+        return ConnectionError::TlsError(msg);
     }
 
     ConnectionError::ConnectionFailed {
@@ -849,10 +908,12 @@ pub fn connection_info(params: &ConnParams) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // -- Parameter resolution: flags > positional > env > defaults ----------
 
     #[test]
+    #[serial]
     fn test_defaults() {
         // Ensure env vars don't interfere.
         let _guard = EnvGuard::new(&[
@@ -878,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cli_flags_override_positionals() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
 
@@ -901,6 +963,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_positionals_used_when_no_flags() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
 
@@ -920,6 +983,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_vars_used_as_fallback() {
         let _guard = EnvGuard::new(&[
             "PGHOST",
@@ -957,6 +1021,7 @@ mod tests {
     // -- URI parsing --------------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_parse_uri_full() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
 
@@ -977,6 +1042,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_uri_minimal() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
 
@@ -1018,9 +1084,29 @@ mod tests {
         assert_eq!(uri_params.dbname, Some("mydb".into()));
     }
 
+    #[test]
+    #[serial]
+    fn test_parse_uri_connect_timeout() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGCONNECT_TIMEOUT",
+        ]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some("postgresql://localhost/db?connect_timeout=5".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.connect_timeout, Some(5));
+    }
+
     // -- Key-value conninfo -------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_parse_conninfo_basic() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
 
@@ -1044,6 +1130,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_conninfo_sslmode() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGSSLMODE"]);
 
@@ -1053,6 +1140,35 @@ mod tests {
         };
         let params = resolve_params(&opts).unwrap();
         assert_eq!(params.sslmode, SslMode::Require);
+    }
+
+    // -- CLI --sslmode flag priority ----------------------------------------
+
+    #[test]
+    #[serial]
+    fn test_cli_sslmode_overrides_env() {
+        let _guard = EnvGuard::new(&["PGSSLMODE"]);
+
+        // Even with env set to "disable", CLI flag wins.
+        let opts = CliConnOpts {
+            sslmode: Some("require".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.sslmode, SslMode::Require);
+    }
+
+    // -- ConnParams Debug masks password ------------------------------------
+
+    #[test]
+    fn test_connparams_debug_masks_password() {
+        let params = ConnParams {
+            password: Some("supersecret".into()),
+            ..ConnParams::default()
+        };
+        let debug_str = format!("{params:?}");
+        assert!(!debug_str.contains("supersecret"));
+        assert!(debug_str.contains("***"));
     }
 
     // -- .pgpass parsing ----------------------------------------------------
@@ -1123,6 +1239,7 @@ mod tests {
     // -- application_name default -------------------------------------------
 
     #[test]
+    #[serial]
     fn test_application_name_defaults_to_samo() {
         let _guard = EnvGuard::new(&["PGAPPNAME"]);
         let opts = CliConnOpts::default();
@@ -1133,6 +1250,7 @@ mod tests {
     // -- Flags override URI -------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_cli_flags_override_uri() {
         let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
 

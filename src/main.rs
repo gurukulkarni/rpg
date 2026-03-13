@@ -93,6 +93,10 @@ struct Cli {
     #[arg(short = 'd', long)]
     dbname: Option<String>,
 
+    /// SSL mode (disable, prefer, require).
+    #[arg(long, value_name = "SSLMODE")]
+    sslmode: Option<String>,
+
     /// Force password prompt.
     #[arg(short = 'W', long)]
     password: bool,
@@ -256,6 +260,7 @@ impl Cli {
             port_pos: self.port_pos.clone(),
             force_password: self.password,
             no_password: self.no_password,
+            sslmode: self.sslmode.clone(),
         }
     }
 }
@@ -271,7 +276,8 @@ async fn main() {
     let cli = Cli::parse();
     let opts = cli.conn_opts();
 
-    // Resolve parameters (for display purposes even if connect fails).
+    // Resolve parameters once; pass into connect() so both display and the
+    // actual driver use the exact same values (avoids double-resolve drift).
     let params = match connection::resolve_params(&opts) {
         Ok(p) => p,
         Err(e) => {
@@ -280,10 +286,10 @@ async fn main() {
         }
     };
 
-    match connection::connect(&opts).await {
-        Ok(client) => {
+    match connection::connect(params, &opts).await {
+        Ok((client, resolved)) => {
             if !cli.quiet {
-                println!("{}", connection::connection_info(&params));
+                println!("{}", connection::connection_info(&resolved));
             }
 
             // If -c or -f given, we would execute here (issue #19).
