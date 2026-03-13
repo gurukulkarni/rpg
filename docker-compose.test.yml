@@ -7,14 +7,9 @@ services:
       POSTGRES_DB: testdb
     ports:
       - "15432:5432"
-    volumes:
-      - ./tests/fixtures/ssl/server.crt:/etc/ssl/certs/pg-test.crt:ro
-      - ./tests/fixtures/ssl/server.key:/etc/ssl/private/pg-test.key:ro
-    command: >
-      postgres
-      -c ssl=on
-      -c ssl_cert_file=/etc/ssl/certs/pg-test.crt
-      -c ssl_key_file=/etc/ssl/private/pg-test.key
+    # TODO: add SSL testing once wire-protocol PR (#22) is merged and
+    # provides the TLS connection code. Use generate-certs.sh to produce
+    # server.crt / server.key at test time (they are not committed).
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
       interval: 2s

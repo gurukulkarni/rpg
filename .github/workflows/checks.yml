@@ -54,6 +54,7 @@ jobs:
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
+    needs: [lint, test]
     services:
       postgres:
         image: postgres:16
@@ -68,6 +69,7 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 15
+          --health-start-period 5s
     env:
       TEST_PGHOST: localhost
       TEST_PGPORT: "15432"

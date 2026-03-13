@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # Generate self-signed TLS certificate for test Postgres.
-# Output files are committed to the repo for CI convenience.
+# Certs are generated at test time and are NOT committed to the repo.
 # DO NOT use these certs in production.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +21,8 @@ main() {
     -text \
     -out server.crt \
     -keyout server.key \
-    -subj "/CN=localhost"
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
 
   # Postgres requires the key to be owned by the postgres user
   # and not group/world readable. Inside Docker, the postgres

@@ -29,6 +29,9 @@ macro_rules! connect_or_skip {
         match TestDb::connect().await {
             Ok(db) => db,
             Err(e) => {
+                if std::env::var("CI").is_ok() {
+                    panic!("database unreachable in CI — this should not happen: {e}");
+                }
                 eprintln!(
                     "skipping integration test — cannot connect to test DB: {e}\n\
                      Start Postgres with: \
