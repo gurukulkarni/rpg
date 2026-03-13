@@ -243,6 +243,34 @@ compare "\\d products" \
 compare "\\d+ products" \
   "\\d+ products"
 
+compare "\\dn+" \
+  "\\dn+"
+
+compare "\\du+" \
+  "\\du+"
+
+compare "\\dv+" \
+  "\\dv+"
+
+## \dm+ — missing Access method column + wrong size (#159)
+# compare "\\dm+" \
+#   "\\dm+"
+
+compare "\\ds+" \
+  "\\ds+"
+
+## \db — missing title (#160)
+# compare "\\db" \
+#   "\\db"
+
+## \dT — returns tables instead of types (#161)
+# compare "\\dT" \
+#   "\\dT"
+
+## \dD — missing title/headers for empty results (#162)
+# compare "\\dD" \
+#   "\\dD"
+
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
 # ---------------------------------------------------------------------------
