@@ -1982,6 +1982,8 @@ pub async fn exec_command(
         parsed.echo_hidden = settings.echo_hidden;
         let mut dummy_settings = ReplSettings {
             echo_hidden: settings.echo_hidden,
+            db_capabilities: settings.db_capabilities.clone(),
+            config: settings.config.clone(),
             ..Default::default()
         };
         let mut tx = TxState::default();
@@ -3658,7 +3660,8 @@ async fn dispatch_meta(
                     | MetaCmd::ListUserMappings
             ) =>
         {
-            crate::describe::execute(client, &parsed).await;
+            crate::describe::execute(client, &parsed, settings.db_capabilities.pg_major_version())
+                .await;
         }
         ref stub => {
             eprintln!("{}: not yet implemented (see #27)", stub.label());
