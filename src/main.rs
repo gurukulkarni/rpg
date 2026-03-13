@@ -5,6 +5,8 @@
 
 use clap::Parser;
 
+mod connection;
+
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
 
@@ -240,6 +242,24 @@ struct Cli {
     log_level: Option<String>,
 }
 
+impl Cli {
+    /// Convert CLI flags into connection-layer options.
+    fn conn_opts(&self) -> connection::CliConnOpts {
+        connection::CliConnOpts {
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            dbname: self.dbname.clone(),
+            dbname_pos: self.dbname_pos.clone(),
+            user_pos: self.user_pos.clone(),
+            host_pos: self.host_pos.clone(),
+            port_pos: self.port_pos.clone(),
+            force_password: self.password,
+            no_password: self.no_password,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -247,11 +267,42 @@ struct Cli {
 // TODO: Replace #[tokio::main] with explicit runtime construction
 // to optimize thread count per operating mode (issue #2, finding #9).
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let _cli = Cli::parse();
+async fn main() {
+    let cli = Cli::parse();
+    let opts = cli.conn_opts();
 
-    // For now, just announce that the binary works.
-    println!("samo {} - not yet connected", long_version());
+    // Resolve parameters (for display purposes even if connect fails).
+    let params = match connection::resolve_params(&opts) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("samo: {e}");
+            std::process::exit(2);
+        }
+    };
 
-    Ok(())
+    match connection::connect(&opts).await {
+        Ok(client) => {
+            if !cli.quiet {
+                println!("{}", connection::connection_info(&params));
+            }
+
+            // If -c or -f given, we would execute here (issue #19).
+            // For now, just disconnect cleanly.
+            if cli.command.is_some() || cli.file.is_some() {
+                // Future: execute command/file, then exit.
+                drop(client);
+            } else {
+                // Future: start REPL (issue #20).
+                // For now, print a note and exit.
+                if !cli.quiet {
+                    println!("(interactive mode not yet implemented — disconnecting)");
+                }
+                drop(client);
+            }
+        }
+        Err(e) => {
+            eprintln!("samo: {e}");
+            std::process::exit(2);
+        }
+    }
 }
