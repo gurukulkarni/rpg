@@ -237,6 +237,8 @@ compare "\\dm" \
 compare "\\di+" \
   "\\di+"
 
+# \d products and \d+ products disabled — partial index WHERE clause missing (#144)
+
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
 # ---------------------------------------------------------------------------
