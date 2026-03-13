@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rustls::ClientConfig;
 use thiserror::Error;
@@ -127,8 +127,7 @@ fn default_host() -> String {
     #[cfg(unix)]
     {
         for dir in &["/var/run/postgresql", "/tmp"] {
-            let path = Path::new(dir);
-            if path.is_dir() {
+            if PathBuf::from(dir).is_dir() {
                 return (*dir).to_owned();
             }
         }
