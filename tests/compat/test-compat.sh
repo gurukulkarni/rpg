@@ -252,22 +252,19 @@ compare "\\du+" \
 compare "\\dv+" \
   "\\dv+"
 
-## \dm+ — missing Access method column + wrong size (#159)
-# compare "\\dm+" \
-#   "\\dm+"
+compare "\\dm+" \
+  "\\dm+"
 
 compare "\\ds+" \
   "\\ds+"
 
-## \db — missing title (#160)
-# compare "\\db" \
-#   "\\db"
+compare "\\db" \
+  "\\db"
 
-## \dT — returns tables instead of types (#161)
-# compare "\\dT" \
-#   "\\dT"
+compare "\\dT" \
+  "\\dT"
 
-## \dD — missing title/headers for empty results (#162)
+## \dD — wrong columns: missing Collation/Check, has Description (#170)
 # compare "\\dD" \
 #   "\\dD"
 
