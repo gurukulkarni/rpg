@@ -71,11 +71,42 @@ fn stub_not_implemented(label: &str) -> bool {
 // Internal execution helper
 // ---------------------------------------------------------------------------
 
-/// Execute `sql` via `simple_query`, print an aligned table, and return
-/// `false` (never exits the REPL).
+/// Execute `sql` via `simple_query`, print an aligned table (with an optional
+/// centered title), and return `false` (never exits the REPL).
 ///
 /// When `echo_hidden` is `true` the SQL is echoed to stderr first.
 async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
+    run_and_print_titled(client, sql, echo_hidden, None).await
+}
+
+/// Like `run_and_print` but also prints a centered title above the table.
+async fn run_and_print_titled(
+    client: &Client,
+    sql: &str,
+    echo_hidden: bool,
+    title: Option<&str>,
+) -> bool {
+    run_and_print_full(client, sql, echo_hidden, title, true).await
+}
+
+/// Like `run_and_print_titled` but suppresses the `(N rows)` footer.
+/// Used by `\d tablename` to match psql behaviour.
+async fn run_and_print_no_count(
+    client: &Client,
+    sql: &str,
+    echo_hidden: bool,
+    title: Option<&str>,
+) -> bool {
+    run_and_print_full(client, sql, echo_hidden, title, false).await
+}
+
+async fn run_and_print_full(
+    client: &Client,
+    sql: &str,
+    echo_hidden: bool,
+    title: Option<&str>,
+    show_row_count: bool,
+) -> bool {
     if echo_hidden {
         eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
     }
@@ -105,7 +136,7 @@ async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
                 }
             }
 
-            print_table(&col_names, &rows);
+            print_table_inner(&col_names, &rows, title, show_row_count);
         }
         Err(e) => {
             eprintln!("ERROR:  {e}");
@@ -115,38 +146,82 @@ async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
     false
 }
 
-/// Print a column-aligned table to stdout.
+/// Print a column-aligned table to stdout, optionally with a centered title.
 ///
 /// Matches the psql default output format:
 /// ```text
+///                List of relations     ← optional centered title
 ///  col1 | col2
 /// ------+------
 ///  val  | val
 /// (N rows)
 /// ```
-fn print_table(col_names: &[String], rows: &[Vec<String>]) {
+///
+/// When `show_row_count` is `false` the `(N rows)` footer is suppressed (used
+/// by `\d tablename` to match psql behaviour).
+#[cfg(test)]
+fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
+    print_table_inner(col_names, rows, title, true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn print_table_inner(
+    col_names: &[String],
+    rows: &[Vec<String>],
+    title: Option<&str>,
+    show_row_count: bool,
+) {
     if col_names.is_empty() {
-        let n = rows.len();
-        let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})");
+        if show_row_count {
+            let n = rows.len();
+            let word = if n == 1 { "row" } else { "rows" };
+            println!("({n} {word})");
+        }
         return;
     }
 
-    // Compute column widths.
+    // Compute column widths (multi-line cell values: each line counts separately).
     let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
     for row in rows {
         for (i, val) in row.iter().enumerate() {
             if i < widths.len() {
-                widths[i] = widths[i].max(val.len());
+                let max_line = val.lines().map(str::len).max().unwrap_or(val.len());
+                widths[i] = widths[i].max(max_line);
             }
         }
     }
 
-    // Header.
+    // Total table width: 1 (leading space) + sum(widths) + 3*(ncols-1) (` | `) + 1 (trailing space).
+    let ncols = widths.len();
+    let table_width =
+        1 + widths.iter().sum::<usize>() + if ncols > 1 { 3 * (ncols - 1) } else { 0 } + 1;
+
+    // Optional title centered to table width.
+    if let Some(t) = title {
+        let tlen = t.len();
+        if tlen >= table_width {
+            println!("{t}");
+        } else {
+            let padding = (table_width - tlen) / 2;
+            println!("{:>width$}", t, width = padding + tlen);
+        }
+    }
+
+    // Header — psql center-aligns column headers within the column width.
     let header: Vec<String> = col_names
         .iter()
         .enumerate()
-        .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+        .map(|(i, c)| {
+            let w = widths[i];
+            let clen = c.len();
+            if clen >= w {
+                c.clone()
+            } else {
+                let left_pad = (w - clen) / 2;
+                let right_pad = w - clen - left_pad;
+                format!("{}{c}{}", " ".repeat(left_pad), " ".repeat(right_pad))
+            }
+        })
         .collect();
     println!(" {} ", header.join(" | "));
 
@@ -154,19 +229,80 @@ fn print_table(col_names: &[String], rows: &[Vec<String>]) {
     let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
     println!("-{}-", sep.join("-+-"));
 
-    // Data rows.
+    // Data rows — cells with embedded newlines are printed as psql continuation
+    // lines.  For the last column, `+` replaces the trailing space.  For middle
+    // columns, `+` is placed within the cell width.
+    let ncols = widths.len();
     for row in rows {
-        let cells: Vec<String> = row
+        // Split each cell into its constituent lines.
+        let cell_lines: Vec<Vec<&str>> = row
             .iter()
-            .enumerate()
-            .map(|(i, v)| format!("{:<width$}", v, width = *widths.get(i).unwrap_or(&v.len())))
+            .map(|v| {
+                let ls: Vec<&str> = v.lines().collect();
+                if ls.is_empty() {
+                    vec![""]
+                } else {
+                    ls
+                }
+            })
             .collect();
-        println!(" {} ", cells.join(" | "));
+
+        let max_lines = cell_lines.iter().map(Vec::len).max().unwrap_or(1);
+
+        for line_idx in 0..max_lines {
+            let mut line = String::new();
+            for (col_idx, &w) in widths.iter().enumerate() {
+                let text = cell_lines
+                    .get(col_idx)
+                    .and_then(|ls| ls.get(line_idx))
+                    .copied()
+                    .unwrap_or("");
+                let has_more = cell_lines
+                    .get(col_idx)
+                    .is_some_and(|ls| line_idx + 1 < ls.len());
+
+                // Column separator.
+                if col_idx == 0 {
+                    line.push(' ');
+                } else {
+                    line.push_str(" | ");
+                }
+
+                if has_more && col_idx < ncols - 1 {
+                    // Middle column with continuation: `+` within cell width.
+                    let text_pad = w.saturating_sub(1).saturating_sub(text.len());
+                    line.push_str(text);
+                    for _ in 0..text_pad {
+                        line.push(' ');
+                    }
+                    line.push('+');
+                } else {
+                    // Normal cell (or last column — continuation handled below).
+                    let padded = format!("{text:<w$}");
+                    line.push_str(&padded);
+                }
+            }
+
+            // Trailing: for the last column with continuation, `+` replaces the
+            // trailing space (matching psql behaviour).
+            let last_has_more = cell_lines
+                .get(ncols - 1)
+                .is_some_and(|ls| line_idx + 1 < ls.len());
+            if last_has_more {
+                line.push('+');
+            } else {
+                line.push(' ');
+            }
+
+            println!("{line}");
+        }
     }
 
-    let n = rows.len();
-    let word = if n == 1 { "row" } else { "rows" };
-    println!("({n} {word})");
+    if show_row_count {
+        let n = rows.len();
+        let word = if n == 1 { "row" } else { "rows" };
+        println!("({n} {word})");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +327,7 @@ fn system_schema_filter(system: bool) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
+#[allow(clippy::too_many_lines)]
 async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -> bool {
     // Build the relkind IN list: ('r','p')
     let kind_list: Vec<String> = relkinds.iter().map(|k| format!("'{k}'")).collect();
@@ -240,18 +377,72 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
            else c.relkind::text
        end";
 
+    // For \di (indexes), we need an extra Table column and index-specific joins.
+    let is_index_only = relkinds == ["i"];
+
     let sql = if meta.plus {
+        if is_index_only {
+            format!(
+                "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    {type_expr} as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    ct.relname as \"Table\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+join pg_catalog.pg_index as idx_i
+    on idx_i.indexrelid = c.oid
+join pg_catalog.pg_class as ct
+    on ct.oid = idx_i.indrelid
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+            )
+        } else {
+            format!(
+                "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    {type_expr} as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
+    coalesce(am.amname, '') as \"Access method\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_am as am
+    on am.oid = c.relam
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+            )
+        }
+    } else if is_index_only {
         format!(
             "select
     n.nspname as \"Schema\",
     c.relname as \"Name\",
     {type_expr} as \"Type\",
     pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
-    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
-    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+    ct.relname as \"Table\"
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
+join pg_catalog.pg_index as idx_i
+    on idx_i.indexrelid = c.oid
+join pg_catalog.pg_class as ct
+    on ct.oid = idx_i.indrelid
 where c.relkind in ({kind_in})
     {where_clause}
 order by 1, 2"
@@ -272,7 +463,7 @@ order by 1, 2"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of relations")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +546,7 @@ order by 1, 2, 4"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of functions")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +605,7 @@ order by 1"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of schemas")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -424,40 +615,55 @@ order by 1"
 async fn list_roles(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "r.rolname", None);
 
-    let where_clause = if name_filter.is_empty() {
-        String::new()
+    // When no pattern is specified, filter out pg_* system roles (matches psql behaviour).
+    let sys_role_filter = if meta.pattern.is_none() {
+        "r.rolname !~ '^pg_'"
     } else {
-        format!("where {name_filter}")
+        ""
     };
 
+    let where_parts: Vec<&str> = [
+        if sys_role_filter.is_empty() {
+            None
+        } else {
+            Some(sys_role_filter)
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    // psql (PG16) shows "Role name" and "Attributes" only (no "Member of" column).
+    // Attributes are expressed as a comma-separated list of capability words.
     let sql = format!(
         "select
     r.rolname as \"Role name\",
-    r.rolsuper as \"Superuser\",
-    r.rolinherit as \"Inherit\",
-    r.rolcreaterole as \"Create role\",
-    r.rolcreatedb as \"Create DB\",
-    r.rolcanlogin as \"Can login\",
-    r.rolreplication as \"Replication\",
-    r.rolconnlimit as \"Connections\",
-    r.rolvaliduntil as \"Password valid until\",
-    coalesce(
-        array_to_string(
-            array(
-                select b.rolname
-                from pg_catalog.pg_auth_members as m
-                join pg_catalog.pg_roles as b on b.oid = m.roleid
-                where m.member = r.oid
-                order by 1
-            ), ','
-        ), ''
-    ) as \"Member of\"
+    case when r.rolsuper then 'Superuser' else '' end
+    || case when not r.rolinherit then case when r.rolsuper then ', No inherit' else 'No inherit' end else '' end
+    || case when r.rolcreaterole then case when r.rolsuper or not r.rolinherit then ', Create role' else 'Create role' end else '' end
+    || case when r.rolcreatedb then case when r.rolsuper or not r.rolinherit or r.rolcreaterole then ', Create DB' else 'Create DB' end else '' end
+    || case when not r.rolcanlogin then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb then ', Cannot login' else 'Cannot login' end else '' end
+    || case when r.rolreplication then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin then ', Replication' else 'Replication' end else '' end
+    || case when r.rolbypassrls then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin or r.rolreplication then ', Bypass RLS' else 'Bypass RLS' end else '' end
+    as \"Attributes\"
 from pg_catalog.pg_roles as r
 {where_clause}
 order by 1"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    // psql suppresses the row count footer for \du.
+    run_and_print_no_count(client, &sql, meta.echo_hidden, Some("List of roles")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +685,12 @@ async fn list_databases(client: &Client, meta: &ParsedMeta) -> bool {
     d.datname as \"Name\",
     pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",
     pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
+    case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' when 'b' then 'builtin' end as \"Locale Provider\",
     d.datcollate as \"Collate\",
     d.datctype as \"Ctype\",
+    d.daticulocale as \"ICU Locale\",
+    d.daticurules as \"ICU Rules\",
+    pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\",
     case
         when pg_catalog.has_database_privilege(d.datname, 'CONNECT')
         then pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))
@@ -500,15 +710,19 @@ order by 1"
     d.datname as \"Name\",
     pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",
     pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
+    case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' when 'b' then 'builtin' end as \"Locale Provider\",
     d.datcollate as \"Collate\",
-    d.datctype as \"Ctype\"
+    d.datctype as \"Ctype\",
+    d.daticulocale as \"ICU Locale\",
+    d.daticurules as \"ICU Rules\",
+    pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\"
 from pg_catalog.pg_database as d
 {where_clause}
 order by 1"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of databases")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -835,7 +1049,7 @@ where c.relkind in ('r','p','i','I','S','v','m','f','c')
 order by 1, 2"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of relations")).await
 }
 
 /// Describe a single table (or view, sequence, …): columns + indexes + constraints.
@@ -893,6 +1107,15 @@ async fn describe_table(client: &Client, meta: &ParsedMeta, obj_pattern: &str) -
         parts.join(" AND ")
     };
 
+    // Default-value expression: identity columns use attidentity, generated columns
+    // use attgenerated; only fall back to pg_attrdef for plain defaults.
+    let default_expr = "case
+        when a.attidentity = 'a' then 'generated always as identity'
+        when a.attidentity = 'd' then 'generated by default as identity'
+        when a.attgenerated = 's' then 'generated always as (' || pg_catalog.pg_get_expr(d.adbin, d.adrelid) || ') stored'
+        else coalesce(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
+    end";
+
     // 1. Columns
     let cols_sql = if meta.plus {
         format!(
@@ -913,7 +1136,7 @@ async fn describe_table(client: &Client, meta: &ParsedMeta, obj_pattern: &str) -
         ''
     ) as \"Collation\",
     case when a.attnotnull then 'not null' else '' end as \"Nullable\",
-    coalesce(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '') as \"Default\",
+    {default_expr} as \"Default\",
     a.attstorage::text as \"Storage\",
     case when a.attstattarget = -1 then '' else a.attstattarget::text end as \"Stats target\",
     coalesce(pg_catalog.col_description(a.attrelid, a.attnum), '') as \"Description\"
@@ -948,7 +1171,7 @@ order by a.attnum"
         ''
     ) as \"Collation\",
     case when a.attnotnull then 'not null' else '' end as \"Nullable\",
-    coalesce(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '') as \"Default\"
+    {default_expr} as \"Default\"
 from pg_catalog.pg_attribute as a
 join pg_catalog.pg_class as c
     on c.oid = a.attrelid
@@ -963,28 +1186,19 @@ order by a.attnum"
         )
     };
 
-    // Use schema-qualified name for display header.
-    let display_name = if let Some(s) = schema_part {
-        if s.is_empty() {
-            name_part.to_owned()
-        } else {
-            format!("{s}.{name_part}")
-        }
-    } else {
-        name_part.to_owned()
-    };
-
-    // Bug 7: fetch relkind to determine the correct object-type label.
+    // Fetch relkind and actual schema to determine the correct object-type label
+    // and build a fully-qualified display name (psql always shows "schema.name").
     let relkind_sql = format!(
-        "select c.relkind::text
+        "select c.relkind::text, n.nspname
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
 where {name_cond}
 limit 1"
     );
-    let obj_label = {
+    let (obj_label, display_name) = {
         let mut label = "Table";
+        let mut resolved_schema = String::new();
         if let Ok(msgs) = client.simple_query(&relkind_sql).await {
             use tokio_postgres::SimpleQueryMessage;
             for msg in msgs {
@@ -1001,15 +1215,25 @@ limit 1"
                         "c" => "Composite type",
                         _ => "Relation",
                     };
+                    row.get(1).unwrap_or("").clone_into(&mut resolved_schema);
                     break;
                 }
             }
         }
-        label
+        // psql always shows schema-qualified name: Table "public.users"
+        let fq_name = if resolved_schema.is_empty() {
+            name_part.to_owned()
+        } else {
+            format!("{resolved_schema}.{name_part}")
+        };
+        (label, fq_name)
     };
 
-    println!("{obj_label} \"{display_name}\"");
-    run_and_print(client, &cols_sql, meta.echo_hidden).await;
+    // Build the centered title and pass it to run_and_print_no_count so it is
+    // centered above the column table — matching psql's \d output.  The row
+    // count footer is suppressed to match psql behaviour.
+    let table_title = format!("{obj_label} \"{display_name}\"");
+    run_and_print_no_count(client, &cols_sql, meta.echo_hidden, Some(&table_title)).await;
 
     // 2. Indexes on this table (Bug 1 applied: use name_part not obj_pattern).
     let idx_name_filter = crate::pattern::where_clause(Some(name_part), "tc.relname", None);
@@ -1051,17 +1275,21 @@ limit 1"
         parts.join(" AND ")
     };
 
-    // Bug 3: check indisprimary BEFORE indisunique so PKs are labelled
-    // "PRIMARY KEY" rather than "UNIQUE PRIMARY KEY".
+    // 2. Indexes — query returns raw fields; we format as psql indented text.
+    // psql format: "name" PRIMARY KEY, btree (cols)  or  "name" btree (cols)
     let idx_sql = format!(
         "select
-    i.relname as \"Index\",
-    case
-        when ix.indisprimary then 'PRIMARY KEY'
-        when ix.indisunique then 'UNIQUE'
-        else ''
-    end || ' ' || am.amname as \"Type\",
-    pg_catalog.pg_get_indexdef(i.oid) as \"Definition\"
+    i.relname as idx_name,
+    ix.indisprimary,
+    ix.indisunique,
+    am.amname,
+    i.oid as idx_oid,
+    (select conname
+     from pg_catalog.pg_constraint
+     where conrelid = ix.indrelid
+       and conindid = i.oid
+       and contype in ('p','u')
+     limit 1) as con_name
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
     on i.oid = ix.indexrelid
@@ -1072,14 +1300,14 @@ join pg_catalog.pg_am as am
 left join pg_catalog.pg_namespace as tn
     on tn.oid = tc.relnamespace
 where {idx_name_cond}
-order by i.relname"
+order by ix.indisprimary desc, ix.indisunique desc, i.relname"
     );
 
     // 3. Check constraints
     let chk_sql = format!(
         "select
-    conname as \"Constraint\",
-    pg_catalog.pg_get_constraintdef(oid, true) as \"Definition\"
+    conname,
+    pg_catalog.pg_get_constraintdef(oid, true) as condef
 from pg_catalog.pg_constraint as co
 where co.contype = 'c'
     and co.conrelid = (
@@ -1096,8 +1324,8 @@ order by 1"
     // 4. Foreign keys (outgoing)
     let fk_sql = format!(
         "select
-    conname as \"Constraint\",
-    pg_catalog.pg_get_constraintdef(oid, true) as \"Definition\"
+    conname,
+    pg_catalog.pg_get_constraintdef(oid, true) as condef
 from pg_catalog.pg_constraint as co
 where co.contype = 'f'
     and co.conrelid = (
@@ -1111,12 +1339,13 @@ where co.contype = 'f'
 order by 1"
     );
 
-    // 5. Referenced by (incoming FKs)
+    // 5. Referenced by (incoming FKs) — psql format:
+    //    TABLE "orders" CONSTRAINT "orders_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
     let ref_sql = format!(
         "select
-    conname as \"Constraint\",
-    pg_catalog.pg_get_constraintdef(oid, true) as \"Definition\",
-    conrelid::regclass::text as \"From table\"
+    conrelid::pg_catalog.regclass::text as from_table,
+    conname,
+    pg_catalog.pg_get_constraintdef(oid, true) as condef
 from pg_catalog.pg_constraint as co
 where co.contype = 'f'
     and co.confrelid = (
@@ -1127,51 +1356,127 @@ where co.contype = 'f'
         where {name_cond}
         limit 1
     )
-order by 1"
+order by 1, 2"
     );
 
-    // Execute secondary queries and print section headers only when results exist.
+    // Indexes — print as indented text lines (psql format), not a table.
     if meta.echo_hidden {
         eprintln!("/******** QUERY *********/\n{idx_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
-        let (cols, rows) = collect_messages(messages);
-        if !rows.is_empty() {
+        use tokio_postgres::SimpleQueryMessage;
+        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str)
+        let mut index_rows: Vec<(String, bool, bool, String, String)> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let idx_name = row.get(0).unwrap_or("").to_owned();
+                let is_primary = row.get(1).unwrap_or("f") == "t";
+                let is_unique = row.get(2).unwrap_or("f") == "t";
+                let amname = row.get(3).unwrap_or("").to_owned();
+                let idx_oid_str = row.get(4).unwrap_or("0").to_owned();
+                // col 5 = con_name (used implicitly via is_primary/is_unique flags)
+                index_rows.push((idx_name, is_primary, is_unique, amname, idx_oid_str));
+            }
+        }
+        if !index_rows.is_empty() {
             println!("Indexes:");
-            print_table(&cols, &rows);
+            for (idx_name, is_primary, is_unique, amname, idx_oid_str) in &index_rows {
+                // Extract column list from pg_get_indexdef (the part inside parens).
+                let indexdef_sql =
+                    format!("select pg_catalog.pg_get_indexdef({idx_oid_str}, 0, true)");
+                let col_expr = if let Ok(def_msgs) = client.simple_query(&indexdef_sql).await {
+                    let mut expr = String::new();
+                    for def_msg in def_msgs {
+                        if let SimpleQueryMessage::Row(def_row) = def_msg {
+                            let full = def_row.get(0).unwrap_or("");
+                            if let (Some(open), Some(close)) = (full.rfind('('), full.rfind(')')) {
+                                full[open..=close].clone_into(&mut expr);
+                            }
+                            break;
+                        }
+                    }
+                    expr
+                } else {
+                    String::new()
+                };
+
+                let type_label = if *is_primary {
+                    " PRIMARY KEY,".to_owned()
+                } else if *is_unique {
+                    " UNIQUE CONSTRAINT,".to_owned()
+                } else {
+                    String::new()
+                };
+
+                println!("    \"{idx_name}\"{type_label} {amname} {col_expr}");
+            }
         }
     }
 
+    // Check constraints — print as indented text lines.
     if meta.echo_hidden {
         eprintln!("/******** QUERY *********/\n{chk_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&chk_sql).await {
-        let (cols, rows) = collect_messages(messages);
-        if !rows.is_empty() {
+        use tokio_postgres::SimpleQueryMessage;
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or("").to_owned();
+                let def = row.get(1).unwrap_or("").to_owned();
+                lines.push((name, def));
+            }
+        }
+        if !lines.is_empty() {
             println!("Check constraints:");
-            print_table(&cols, &rows);
+            for (name, def) in &lines {
+                println!("    \"{name}\" {def}");
+            }
         }
     }
 
+    // Foreign-key constraints — print as indented text lines.
     if meta.echo_hidden {
         eprintln!("/******** QUERY *********/\n{fk_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&fk_sql).await {
-        let (cols, rows) = collect_messages(messages);
-        if !rows.is_empty() {
+        use tokio_postgres::SimpleQueryMessage;
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or("").to_owned();
+                let def = row.get(1).unwrap_or("").to_owned();
+                lines.push((name, def));
+            }
+        }
+        if !lines.is_empty() {
             println!("Foreign-key constraints:");
-            print_table(&cols, &rows);
+            for (name, def) in &lines {
+                println!("    \"{name}\" {def}");
+            }
         }
     }
 
+    // Referenced by — print as indented text lines (psql format).
     if meta.echo_hidden {
         eprintln!("/******** QUERY *********/\n{ref_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&ref_sql).await {
-        let (cols, rows) = collect_messages(messages);
-        if !rows.is_empty() {
+        use tokio_postgres::SimpleQueryMessage;
+        let mut lines: Vec<(String, String, String)> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let from_table = row.get(0).unwrap_or("").to_owned();
+                let name = row.get(1).unwrap_or("").to_owned();
+                let def = row.get(2).unwrap_or("").to_owned();
+                lines.push((from_table, name, def));
+            }
+        }
+        if !lines.is_empty() {
             println!("Referenced by:");
-            print_table(&cols, &rows);
+            for (from_table, name, def) in &lines {
+                println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
+            }
         }
     }
 
@@ -1179,6 +1484,7 @@ order by 1"
 }
 
 /// Collect `SimpleQueryMessage` responses into `(col_names, rows)`.
+#[cfg(test)]
 fn collect_messages(
     messages: Vec<tokio_postgres::SimpleQueryMessage>,
 ) -> (Vec<String>, Vec<Vec<String>>) {
@@ -1447,7 +1753,7 @@ order by 2, 3"
         let cols = vec!["Schema".to_owned(), "Name".to_owned()];
         let rows: Vec<Vec<String>> = vec![];
         // Should not panic.
-        print_table(&cols, &rows);
+        print_table(&cols, &rows, None);
     }
 
     #[test]
@@ -1455,13 +1761,13 @@ order by 2, 3"
         let cols = vec!["Name".to_owned()];
         let rows = vec![vec!["users".to_owned()]];
         // Should not panic.
-        print_table(&cols, &rows);
+        print_table(&cols, &rows, None);
     }
 
     #[test]
     fn print_table_empty_no_columns() {
         // Edge case: no columns, no rows — prints (0 rows).
-        print_table(&[], &[]);
+        print_table(&[], &[], None);
     }
 
     // -----------------------------------------------------------------------
@@ -1482,11 +1788,11 @@ order by 2, 3"
     #[test]
     fn plus_modifier_adds_size_column() {
         // Reconstruct SQL fragment for \dt+ and check for Size column.
-        // Uses pg_total_relation_size (correct for partitioned tables too).
+        // Uses pg_table_size to match psql \dt+ behaviour.
         let sql = format!(
             "select\n    n.nspname as \"Schema\",\n    c.relname as \"Name\",\
             \n    {} as \"Type\",\n    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",\
-            \n    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",\
+            \n    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",\
             \n    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"",
             "c.relkind"
         );
@@ -1496,8 +1802,8 @@ order by 2, 3"
             "plus SQL should have Description: {sql}"
         );
         assert!(
-            sql.contains("pg_total_relation_size"),
-            "plus SQL should use pg_total_relation_size: {sql}"
+            sql.contains("pg_table_size"),
+            "plus SQL should use pg_table_size: {sql}"
         );
     }
 }
