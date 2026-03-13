@@ -6111,7 +6111,7 @@ async fn handle_ai_ask(
     if settings.no_highlight {
         println!("{sql}");
     } else {
-        println!("{}", crate::highlight::highlight_sql(sql));
+        println!("{}", crate::highlight::highlight_sql(sql, None));
     }
 
     // Decide whether to execute.
