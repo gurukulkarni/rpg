@@ -25,6 +25,9 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+[dev-dependencies]
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 # Allow common patterns that pedantic flags unnecessarily

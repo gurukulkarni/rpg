@@ -29,7 +29,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -50,3 +50,43 @@ jobs:
             test-${{ runner.os }}-cargo-
       - name: Run tests
         run: cargo test
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d testdb"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      TEST_PGHOST: localhost
+      TEST_PGPORT: "15432"
+      TEST_PGUSER: testuser
+      TEST_PGPASSWORD: testpass
+      TEST_PGDATABASE: testdb
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: integration-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            integration-${{ runner.os }}-cargo-
+      - name: Run integration tests
+        run: cargo test --features integration
