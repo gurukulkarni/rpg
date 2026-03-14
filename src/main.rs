@@ -49,6 +49,7 @@ mod bloat;
 mod index_health;
 mod issues;
 mod rca_actions;
+mod vacuum;
 mod verification;
 
 /// Build-time git commit hash injected by `build.rs`.
