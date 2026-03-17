@@ -478,14 +478,19 @@ pub(super) enum AskChoice {
 ///
 /// `default_yes` controls the behaviour when the user presses Enter without
 /// typing: `true` → defaults to `Yes`, `false` → defaults to `No`.
+///
+/// Ctrl+C and Ctrl+D (EOF) always return `No` regardless of the default,
+/// so the user can safely abort without the query being executed.
 pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
     use std::io::Write;
     eprint!("{prompt}");
     let _ = io::stderr().flush();
 
     let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return AskChoice::No;
+    match io::stdin().read_line(&mut input) {
+        // EOF (0 bytes) or error: Ctrl+C / Ctrl+D — abort, never execute.
+        Ok(0) | Err(_) => return AskChoice::No,
+        Ok(_) => {}
     }
     let answer = input.trim().to_lowercase();
     if answer.is_empty() {
