@@ -892,6 +892,10 @@ pub struct ReplSettings {
     pub exec_mode: ExecMode,
     /// Auto-EXPLAIN level — prepend EXPLAIN to queries when not Off.
     pub auto_explain: AutoExplain,
+    /// Controls how EXPLAIN output is rendered in the interactive REPL.
+    ///
+    /// Set via `\pset explain_format enhanced|raw|compact`.
+    pub explain_format: crate::explain::ExplainFormat,
     /// Context from the most-recently failed query.
     ///
     /// Populated whenever a query returns an error; cleared on the next
@@ -1046,6 +1050,20 @@ pub struct ReplSettings {
     /// `/ask` transaction (which SHOULD be rolled back if it leaks into the
     /// next command due to an error or interruption).
     pub internal_tx: bool,
+    /// Raw text of the last EXPLAIN output (plain text format).
+    ///
+    /// Populated whenever an EXPLAIN query succeeds, so that
+    /// `\explain share` can upload it to explain.depesz.com or
+    /// explain.dalibo.com.  `None` if no EXPLAIN has been run yet.
+    pub last_explain_text: Option<String>,
+
+    // -- Custom Lua commands (#659) ----------------------------------------
+    /// Registry of custom backslash commands loaded from Lua scripts.
+    ///
+    /// Populated once at startup from `~/.config/rpg/commands/*.lua`.
+    /// When the `lua` feature is not compiled in, this registry is always
+    /// empty and custom-command execution returns a feature-absent error.
+    pub lua_registry: crate::lua_commands::LuaRegistry,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1092,6 +1110,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("input_mode", &self.input_mode)
             .field("exec_mode", &self.exec_mode)
             .field("auto_explain", &self.auto_explain)
+            .field("explain_format", &self.explain_format)
             .field(
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
@@ -1147,6 +1166,14 @@ impl std::fmt::Debug for ReplSettings {
                 &self.last_t2s_nl_query.as_deref().map(|_| "<nl-query>"),
             )
             .field("internal_tx", &self.internal_tx)
+            .field(
+                "last_explain_text",
+                &self.last_explain_text.as_deref().map(|_| "<explain>"),
+            )
+            .field(
+                "lua_commands",
+                &format!("{} loaded", self.lua_registry.commands.len()),
+            )
             .finish()
     }
 }
@@ -1184,6 +1211,7 @@ impl Default for ReplSettings {
             input_mode: InputMode::default(),
             exec_mode: ExecMode::default(),
             auto_explain: AutoExplain::default(),
+            explain_format: crate::explain::ExplainFormat::default(),
             last_error: None,
             conversation: ConversationContext::new(),
             tokens_used: 0,
@@ -1211,6 +1239,8 @@ impl Default for ReplSettings {
             prompt_interrupted: false,
             last_t2s_nl_query: None,
             internal_tx: false,
+            last_explain_text: None,
+            lua_registry: crate::lua_commands::LuaRegistry::load(""),
         }
     }
 }
@@ -1720,6 +1750,10 @@ Auto-EXPLAIN:
   \\set EXPLAIN analyze  show EXPLAIN ANALYZE for every query
   \\set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
   \\set EXPLAIN off      disable auto-EXPLAIN
+
+EXPLAIN sharing:
+  \\explain share depesz  upload last EXPLAIN plan to explain.depesz.com
+  \\explain share dalibo   upload last EXPLAIN plan to explain.dalibo.com
 
 Function keys (interactive mode):
   F2 / \\f2       toggle schema-aware tab completion on/off
@@ -2363,6 +2397,23 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 eprintln!("\\pset: invalid pager_min_lines value");
             }
         }
+        "explain_format" => {
+            use crate::explain::ExplainFormat;
+            let fmt = match value.unwrap_or("enhanced") {
+                "enhanced" => ExplainFormat::Enhanced,
+                "raw" => ExplainFormat::Raw,
+                "compact" => ExplainFormat::Compact,
+                other => {
+                    eprintln!(
+                        "\\pset: unknown explain_format \"{other}\"\n\
+                         Valid: enhanced, raw, compact"
+                    );
+                    return;
+                }
+            };
+            settings.explain_format = fmt;
+            println!("EXPLAIN format is {}.", fmt.as_str());
+        }
         other => {
             eprintln!("\\pset: unknown option \"{other}\"");
         }
@@ -2430,6 +2481,7 @@ fn pset_status_text(settings: &ReplSettings) -> String {
             let _ = writeln!(out, "title          = (not set)");
         }
     }
+    let _ = writeln!(out, "explain_format = {}", settings.explain_format.as_str());
     out
 }
 
@@ -3174,8 +3226,49 @@ async fn dispatch_meta(
         MetaCmd::ToggleAutoExplain => {
             apply_fkey_toggle(FKeyAction::AutoExplain, settings);
         }
+        // Custom Lua commands (#659).
+        MetaCmd::ListCustomCommands => {
+            let cmds = &settings.lua_registry.commands;
+            if cmds.is_empty() {
+                println!(
+                    "No custom commands loaded.\n\
+                     Add Lua scripts to ~/.config/rpg/commands/*.lua"
+                );
+            } else {
+                let mut out = String::from("Custom commands:\n");
+                for cmd in cmds {
+                    use std::fmt::Write as _;
+                    let _ = writeln!(out, "  \\{:<20} {}", cmd.name, cmd.description);
+                }
+                maybe_page(settings, &out);
+            }
+        }
         MetaCmd::Unknown(ref name) => {
-            eprintln!("Invalid command \\{name}. Try \\? for help.");
+            // Before reporting "unknown command", check whether a custom Lua
+            // command with this name exists.  The Unknown token stores the raw
+            // string after `\`; it may include arguments after the first word.
+            let (cmd_name, rest) = name
+                .split_once(char::is_whitespace)
+                .map_or((name.as_str(), ""), |(n, r)| (n, r));
+            if settings.lua_registry.get(cmd_name).is_some() {
+                let args: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let dbname = params.dbname.clone();
+                let cmd_name_owned = cmd_name.to_owned();
+                let result = tokio::task::block_in_place(|| {
+                    settings.lua_registry.execute_command(
+                        &cmd_name_owned,
+                        &arg_refs,
+                        &dbname,
+                        client,
+                    )
+                });
+                if let Err(e) = result {
+                    eprintln!("{e}");
+                }
+            } else {
+                eprintln!("Invalid command \\{name}. Try \\? for help.");
+            }
         }
         MetaCmd::SqlHelp => match crate::session::sql_help_text(parsed.pattern.as_deref()) {
             Ok(text) => maybe_page(settings, &text),
@@ -3447,6 +3540,10 @@ async fn dispatch_meta(
                 return result;
             }
         }
+        // Explain share (#655).
+        MetaCmd::ExplainShare(ref service) => {
+            dispatch_explain_share(settings, service).await;
+        }
         // Large object commands (#400).
         MetaCmd::LoImport(ref filename, ref comment) => {
             let filename = filename.clone();
@@ -3471,6 +3568,49 @@ async fn dispatch_meta(
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Explain share helper (#655)
+// ---------------------------------------------------------------------------
+
+/// Handle `\explain share <service>`.
+///
+/// Uploads the last stored EXPLAIN plan to the chosen external visualiser,
+/// prints the resulting URL, and copies it to the system clipboard.
+async fn dispatch_explain_share(settings: &mut ReplSettings, service: &str) {
+    let plan_text = match settings.last_explain_text.as_deref() {
+        Some(t) if !t.is_empty() => t.to_owned(),
+        _ => {
+            eprintln!(
+                "\\explain share: no EXPLAIN plan available.\n\
+                 Run an EXPLAIN query first, then use \\explain share."
+            );
+            return;
+        }
+    };
+
+    if service.is_empty() {
+        eprintln!(
+            "\\explain share: service name required.\n\
+             Usage: \\explain share depesz\n\
+             Usage: \\explain share dalibo"
+        );
+        return;
+    }
+
+    println!("Uploading EXPLAIN plan to {service}…");
+
+    match crate::explain::share::share_explain_plan(&plan_text, service).await {
+        Ok(url) => {
+            println!("Plan URL: {url}");
+            crate::explain::share::copy_to_clipboard(&url);
+            println!("(URL copied to clipboard)");
+        }
+        Err(e) => {
+            eprintln!("\\explain share: {e}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3665,6 +3805,9 @@ pub async fn run_repl(
     // Populate audit connection context from the resolved params.
     settings.audit_dbname = params.dbname.clone();
     settings.audit_user = params.user.clone();
+
+    // Load custom Lua commands now that we know the database name.
+    settings.lua_registry = crate::lua_commands::LuaRegistry::load(&params.dbname);
 
     // Open audit log file from config if one is configured.
     if settings.audit_log_file.is_none() {

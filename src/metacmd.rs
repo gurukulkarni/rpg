@@ -355,6 +355,19 @@ pub enum MetaCmd {
     /// Payload: the OID as a string.
     LoUnlink(String),
 
+    // -- Explain share (#655) ---------------------------------------------
+    /// `\explain share <service>` — upload the last EXPLAIN plan to an
+    /// external visualiser and print the resulting URL.
+    ///
+    /// `service` is either `"depesz"` (explain.depesz.com) or
+    /// `"dalibo"` (explain.dalibo.com).
+    ExplainShare(String),
+
+    // -- Custom Lua commands (#659) ----------------------------------------
+    /// `\commands` — list all custom Lua meta-commands loaded from
+    /// `~/.config/rpg/commands/*.lua`.
+    ListCustomCommands,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -879,6 +892,13 @@ fn parse_c_family(input: &str) -> ParsedMeta {
             }
         }
     }
+    // `\commands` — list custom Lua meta-commands.  Must be checked before
+    // `\copy`, `\cd`, and `\c` to avoid a spurious match.
+    if let Some(rest) = input.strip_prefix("commands") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ListCustomCommands);
+        }
+    }
     // `\crosstabview [args]` — must be checked before `\copy` and `\c` (longest match).
     if let Some(rest) = input.strip_prefix("crosstabview") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -1125,6 +1145,21 @@ fn split_lo_args(s: &str) -> (String, String) {
 ///
 /// Longer prefixes are checked first to avoid false prefix matches.
 fn parse_e_family(input: &str) -> ParsedMeta {
+    // `\explain share <service>` — upload last EXPLAIN plan to a visualiser.
+    // Must be checked before bare `\e` (longer prefix first).
+    if let Some(rest) = input.strip_prefix("explain") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let args = rest.trim();
+            // `\explain share depesz` / `\explain share dalibo`
+            if let Some(share_rest) = args.strip_prefix("share") {
+                let service = share_rest.trim().to_lowercase();
+                return ParsedMeta::simple(MetaCmd::ExplainShare(service));
+            }
+            // Bare `\explain` or unknown sub-command — fall through to Unknown.
+            return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+        }
+    }
+
     // `\endif` — no argument.
     if let Some(rest) = input.strip_prefix("endif") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -3617,5 +3652,78 @@ mod tests {
     fn parse_lo_commands_not_confused_with_list_databases() {
         // `\l` must still work after `\lo_*` is added.
         assert_eq!(parse("\\l").cmd, MetaCmd::ListDatabases);
+    }
+
+    // -- \explain share (#655) -----------------------------------------------
+
+    #[test]
+    fn parse_explain_share_depesz() {
+        let m = parse("\\explain share depesz");
+        assert_eq!(m.cmd, MetaCmd::ExplainShare("depesz".to_owned()));
+    }
+
+    #[test]
+    fn parse_explain_share_dalibo() {
+        let m = parse("\\explain share dalibo");
+        assert_eq!(m.cmd, MetaCmd::ExplainShare("dalibo".to_owned()));
+    }
+
+    #[test]
+    fn parse_explain_share_normalises_case() {
+        // Service name is lowercased by the parser.
+        let m = parse("\\explain share DEPESZ");
+        assert_eq!(m.cmd, MetaCmd::ExplainShare("depesz".to_owned()));
+    }
+
+    #[test]
+    fn parse_explain_bare_is_unknown() {
+        // `\explain` with no subcommand is Unknown (no sub-command given).
+        assert!(matches!(parse("\\explain").cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_explain_share_not_confused_with_echo() {
+        // `\echo` must still parse correctly.
+        let m = parse("\\echo hello");
+        assert_eq!(m.cmd, MetaCmd::Echo);
+    }
+
+    #[test]
+    fn parse_explain_share_not_confused_with_encoding() {
+        // `\encoding` must still parse correctly.
+        let m = parse("\\encoding UTF8");
+        assert_eq!(m.cmd, MetaCmd::Encoding);
+    }
+
+    // -- Custom Lua commands (#659) -----------------------------------------
+
+    #[test]
+    fn parse_list_custom_commands() {
+        assert_eq!(parse("\\commands").cmd, MetaCmd::ListCustomCommands);
+    }
+
+    #[test]
+    fn parse_list_custom_commands_bare() {
+        // `\commands` with trailing whitespace is still valid.
+        assert_eq!(parse("\\commands ").cmd, MetaCmd::ListCustomCommands);
+    }
+
+    #[test]
+    fn parse_commands_not_confused_with_conninfo() {
+        // `\conninfo` must not match `\commands`.
+        assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+    }
+
+    #[test]
+    fn parse_commands_not_confused_with_copy() {
+        // `\copy` must still work.
+        let m = parse("\\copy t from stdin");
+        assert_eq!(m.cmd, MetaCmd::Copy("t from stdin".to_owned()));
+    }
+
+    #[test]
+    fn parse_commands_not_confused_with_c_reconnect() {
+        // Bare `\c` must still be Reconnect.
+        assert_eq!(parse("\\c").cmd, MetaCmd::Reconnect);
     }
 }
