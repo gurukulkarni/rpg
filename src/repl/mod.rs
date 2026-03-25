@@ -10,6 +10,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use rustyline::error::ReadlineError;
@@ -1004,7 +1005,11 @@ pub struct ReplSettings {
     /// Persistent status bar rendered at the bottom of the terminal.
     ///
     /// Present only in interactive sessions; `None` in non-interactive paths.
-    pub statusline: Option<crate::statusline::StatusLine>,
+    ///
+    /// Wrapped in `Arc<Mutex<...>>` so the SIGWINCH signal handler (spawned in
+    /// `run_readline_loop`) can share ownership and call `on_resize()`/`render()`
+    /// from a background tokio task without data races.
+    pub statusline: Option<Arc<Mutex<crate::statusline::StatusLine>>>,
     /// Last query duration in milliseconds (for the status bar).
     ///
     /// Updated after each query execution.
@@ -1155,7 +1160,13 @@ impl std::fmt::Debug for ReplSettings {
                 &self.project_context.as_deref().map(|_| "<text>"),
             )
             .field("ai_context_files", &self.ai_context_files.len())
-            .field("statusline", &self.statusline.as_ref().map(|s| s.enabled))
+            .field(
+                "statusline",
+                &self
+                    .statusline
+                    .as_ref()
+                    .and_then(|s| s.lock().ok().map(|g| g.enabled)),
+            )
             .field("last_query_duration_ms", &self.last_query_duration_ms)
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
@@ -1956,12 +1967,14 @@ fn maybe_page(settings: &mut ReplSettings, text: &str) {
             settings.pager_min_lines,
         )
     {
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.clear();
             sl.teardown_scroll_region();
         }
         run_pager_for_text(settings, text, text.as_bytes());
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.setup_scroll_region();
             sl.render();
         }
@@ -2141,7 +2154,8 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "STATUSLINE" {
         let on = matches!(value, "on" | "true" | "1");
         settings.config.display.statusline_enabled = on;
-        if let Some(ref mut sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let mut sl = sl_arc.lock().unwrap();
             sl.enabled = on;
             if on {
                 sl.setup_scroll_region();
@@ -4141,7 +4155,7 @@ pub async fn run_repl(
         sl.set_connection(&params.host, params.port, &params.dbname);
         sl.setup_scroll_region();
         sl.render();
-        settings.statusline = Some(sl);
+        settings.statusline = Some(Arc::new(Mutex::new(sl)));
     }
 
     let exit_code = if use_readline {
@@ -4151,8 +4165,8 @@ pub async fn run_repl(
     };
 
     // Tear down the status bar on exit.
-    if let Some(ref sl) = settings.statusline {
-        sl.teardown_scroll_region();
+    if let Some(ref sl_arc) = settings.statusline {
+        sl_arc.lock().unwrap().teardown_scroll_region();
     }
 
     exit_code
@@ -4325,6 +4339,36 @@ async fn run_readline_loop(
         let _ = rl.load_history(p);
     }
 
+    // Install a SIGWINCH handler so the status bar redraws immediately when
+    // the terminal is resized, even while a query is running.
+    //
+    // The `shutdown` flag is set before `run_readline_loop` returns so the
+    // task does not call `on_resize()` after `teardown_scroll_region()`.
+    let sigwinch_shutdown = Arc::new(AtomicBool::new(false));
+    // SIGWINCH is a Unix-only signal; skip on Windows where the terminal
+    // resize event model differs and tokio::signal::unix is unavailable.
+    #[cfg(unix)]
+    if let Some(ref sl_arc) = settings.statusline {
+        use tokio::signal::unix::{signal, SignalKind};
+        let sl_watcher = Arc::clone(sl_arc);
+        let shutdown_flag = Arc::clone(&sigwinch_shutdown);
+        tokio::spawn(async move {
+            let Ok(mut sigwinch) = signal(SignalKind::window_change()) else {
+                return;
+            };
+            while sigwinch.recv().await.is_some() {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut sl = sl_watcher
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                sl.on_resize();
+                sl.render();
+            }
+        });
+    }
+
     let mut buf = String::new();
     // Accumulates the complete multi-line statement text for history.
     let mut stmt_buf = String::new();
@@ -4335,7 +4379,8 @@ async fn run_readline_loop(
 
         // Re-render the status bar before each prompt so it stays fresh
         // (handles resize events and mode changes from previous commands).
-        if let Some(ref mut sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let mut sl = sl_arc.lock().unwrap();
             sl.set_auto_explain(settings.auto_explain);
             sl.on_resize();
         }
@@ -4425,7 +4470,8 @@ async fn run_readline_loop(
                         settings.audit_dbname.clone_from(&params.dbname);
                         settings.audit_user.clone_from(&params.user);
                         // Update status bar with new connection label.
-                        if let Some(ref mut sl) = settings.statusline {
+                        if let Some(ref sl_arc) = settings.statusline {
+                            let mut sl = sl_arc.lock().unwrap();
                             sl.set_connection(&params.host, params.port, &params.dbname);
                             sl.render();
                         }
@@ -4476,6 +4522,10 @@ async fn run_readline_loop(
             settings.cond.depth()
         );
     }
+
+    // Signal the SIGWINCH watcher to stop before we return so it cannot call
+    // `on_resize()` after `teardown_scroll_region()` runs in the caller.
+    sigwinch_shutdown.store(true, Ordering::Relaxed);
 
     0
 }
